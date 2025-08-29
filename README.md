@@ -64,7 +64,7 @@ Aggressive memory tuning prioritizes RAM utilization over swap usage, keeping ac
 
 **TMPFS Overlay Integration:** Critical temporary directories (`/tmp`, `/var/tmp`, `/var/log`) are mounted as tmpfs to leverage RAM for high-speed file storage. Each mount has a predefined size (`/tmp` = 5G, `/var/tmp` = 1G, `/var/log` = 512M). A persistent fallback directory (`/var/tmp/fallback`) is created to handle overflow, with symbolic linking (`/tmp/large_files`) for seamless access. Cleanup routines monitor these directories.
 
-* Periodic cleanup: Removes files older than specified thresholds (5 minutes for /tmp and /var/tmp, 4 hours for the fallback).
+* Periodic cleanup: Removes files older than specified thresholds (5 minutes for `/tmp` and `/var/tmp`, 4 hours for the fallback).
 
 * Safe removal: Ensures files in use are never deleted.
 
