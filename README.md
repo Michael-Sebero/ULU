@@ -89,7 +89,7 @@ CoolRune automatically detects CPU architecture on installation to ensure optima
 
 * **Machine Learning/LLM** - Specialized for AI workloads with HugePages allocation, NUMA topology awareness, reduced security mitigations, optimized memory bandwidth utilization and reduced kernel overhead for sustained computational tasks.
 
-* **Server** - Network enhancements tailored for server hardware.
+* **Server** - Network enhancements tailored for server hardware. Features optimized TCP stack with BBR congestion control, aggressive connection handling (2M TIME_WAIT buckets, fast recycling), enhanced network buffers (16MB socket buffers), comprehensive IPv4/IPv6 filtering with martian packet logging and DDoS mitigation through rate limiting and connection flood protection while maintaining low-latency network performance for high-throughput server applications.
 
 <p align="center">
 	<img src="https://i.postimg.cc/C53HDLTZ/ksnip-20240224-100057.png" />
