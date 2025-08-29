@@ -201,9 +201,6 @@ s6-service add default earlyoom
 # RESET PERMISSIONS
 reset-permissions
 
-# INSTALL AUR PACKAGES
-take zfs-dkms-staging-git || true
-
 # REMOVE CONNMAN & REFRESH
 rm /etc/s6/adminsv/default/contents.d/connmand
 pacman -Rdd --noconfirm connman connman-s6 connman-gtk

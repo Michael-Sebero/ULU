@@ -38,7 +38,7 @@
 * Low latency [PipeWire](https://github.com/PipeWire/pipewire) audio processing.
 * [ALHP](https://wiki.archlinux.org/title/Unofficial_user_repositories#ALHP), [Chaotic-AUR](https://github.com/chaotic-aur/packages) and [Flatpak](https://flatpak.org/) repositories.
 * Steam [Proton GE](https://github.com/GloriousEggroll/proton-ge-custom) prefix.
-* [ZFS](https://github.com/openzfs/zfs) compatiblity.
+* [ZFS](https://github.com/openzfs/zfs) compatiblity (for server preset only).
 * Optional pre-configured PipeWire audio profiles.
 * Custom Windows-like XFCE theme.
 * [Booster](https://github.com/anatol/booster) (mkinitcpio replacement).
