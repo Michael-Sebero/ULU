@@ -44,7 +44,7 @@
 * [Booster](https://github.com/anatol/booster) (mkinitcpio replacement).
 * Battery life optimizations for laptops via [TLP](https://github.com/linrunner/TLP).
 * [Mimalloc](https://github.com/microsoft/mimalloc) (high-performance memory allocator).
-* Uses ZRAM and tmpfs to speed up temporary directories by compressing RAM and reducing disk I/O.
+* Uses tmpfs to speed up temporary directories by reducing disk I/O.
 
 ## Performance & Security Expectations
 * **10-25%** FPS boost in gaming.
@@ -60,7 +60,15 @@ CoolRune implements kernel hardening which increases security and performance. T
 ### Memory Management Optimization
 Aggressive memory tuning prioritizes RAM utilization over swap usage, keeping active data in fast memory while optimizing write-back behavior for sustained throughput. The VM subsystem is configured to reduce unnecessary memory compaction overhead while maintaining balanced VFS cache pressure for responsive file operations. HugePages are pre-allocated to eliminate allocation overhead for memory-intensive applications.
 
-**Zram Integration:** The system implements a dual-layer compressed memory architecture using zram devices. A primary zram0 device provides optimized swap space sized at 25% of available RAM, while a secondary zram1 device (4GB) serves as high-performance storage for temporary filesystems. Directories (/tmp, /var/tmp, /var/log) are mounted as tmpfs overlays with automatic fallback mechanisms and cleanup routines that monitor file usage and age. Zram compression uses zstd algorithm where available, falling back to lzo for maximum compatibility, ensuring minimal CPU overhead while maximizing memory efficiency through real-time compression of inactive pages.
+**Zram Integration:** The system configures a zram-based swap device (/dev/zram0) to provide fast, compressed virtual memory. Its size is dynamically set to 25% of total RAM. The device is initialized with mkswap and immediately activated with swapon. Compression prioritizes zstd when available, falling back to lzo to maintain low CPU overhead while efficiently storing inactive memory pages. This setup accelerates memory-intensive workloads by reducing disk I/O and keeping more data in RAM.
+
+**TMPFS Overlay Integration:** Critical temporary directories (`/tmp`, `/var/tmp`, `/var/log`) are mounted as tmpfs to leverage RAM for high-speed file storage. Each mount has a predefined size (`/tmp` = 5G, `/var/tmp` = 1G, `/var/log` = 512M). A persistent fallback directory (`/var/tmp/fallback`) is created to handle overflow, with symbolic linking (`/tmp/large_files`) for seamless access. Cleanup routines monitor these directories.
+
+* Periodic cleanup: Removes files older than specified thresholds (5 minutes for /tmp and /var/tmp, 4 hours for the fallback).
+
+* Safe removal: Ensures files in use are never deleted.
+
+* Shutdown cleanup: Fallback directories are cleared on system exit.
 
 ### Network Stack Enhancement
 Network performance leverages BBR congestion control and fq_codel queue management to improve throughput and reduce latency. The TCP stack uses expanded buffer sizes and enables fast connection establishment. IPv6 is configured with privacy extensions but with restrictive security settings that prioritize security over performance convenience.
