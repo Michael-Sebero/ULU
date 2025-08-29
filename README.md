@@ -44,7 +44,7 @@
 * [Booster](https://github.com/anatol/booster) (mkinitcpio replacement).
 * Battery life optimizations for laptops via [TLP](https://github.com/linrunner/TLP).
 * [Mimalloc](https://github.com/microsoft/mimalloc) (high-performance memory allocator).
-* Uses tmpfs to speed up temporary directories by reducing disk I/O.
+* Uses tmpfs to speed up temporary directories and reducing disk I/O.
 
 ## Performance & Security Expectations
 * **10-25%** FPS boost in gaming.
