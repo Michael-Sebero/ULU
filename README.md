@@ -90,7 +90,7 @@ CoolRune automatically detects CPU architecture on installation to ensure optima
 
 * **NVIDIA** - Configured for NVIDIA GPU acceleration with CUDA optimizations, enhanced memory allocation for GPU computing and driver-specific performance tuning for gaming and machine learning workloads.
 
-* **Laptop** - Balanced between power saving and increased system performance. Includes bluetooth capibility, faster system responsiveness and system hardening. 
+* **Laptop** - Balanced between power saving and increased system performance. Includes bluetooth capibility, faster system responsiveness and system hardening. Features `ac-mode` which increases system performance when the system is at 79% battery life and AC powered. 
 
 ### Workload-Specific Presets
 * **High Performance** - Maximum throughput configuration with reduced security mitigations, aggressive CPU scheduling, expanded memory limits and enhanced graphics pipeline.
