@@ -1,6 +1,6 @@
 ==================================================================================================================================================
 
-                                                                                                                             - COOLRUNE MANUAL ***
+                                                                                                                          - ALGIZ LINUX MANUAL ***
 
 ==================================================================================================================================================
 
@@ -39,17 +39,17 @@
 
  - In Konsole there's a list of quick commands provided in [ - Commands - ]
  
- - The command [ optional ] installs optional packages for CoolRune, this is useful if you have a laptop.
+ - The command [ optional ] installs optional packages for Algiz, this is useful if you have a laptop.
  
  - Enter the command [ nmtui ] to connect to the internet.
 
  - To update all of your system's packages at once run the command [ update ]
 
- - If you want to update CoolRune to the newest version, run the command [ update-coolrune ]
+ - If you want to update Algiz to the newest version, run the command [ update-algiz ]
 
- - CoolRune uses an automatic MAC address changer upon login.
+ - Algiz uses an automatic MAC address changer upon login.
 
- - All DNS traffic is encrypted through [ dnscrypt-proxy ] via Yandex which prevents DNS leaks.
+ - All DNS traffic is encrypted through [ dnscrypt-proxy ] via Mullvad which prevents DNS leaks.
 
  - The [ steal ] command installs packages from the default repo, AUR and Flatpak. It also can download videos.
  
@@ -61,7 +61,7 @@
 
  - Change shaders to Vulkan in Steam settings and enable Steam Play for Linux compatibility.
 
- - Use [ GloriousEggroll ] which is provided with CoolRune as your proton prefix for Steam.
+ - Use [ GloriousEggroll ] which is provided with Algiz as your proton prefix for Steam.
 
  - To get more FPS for games copy & paste [ gamemoderun %command% ] in launch options which is found through properties in Steam.
 
@@ -140,11 +140,11 @@
  
 ..................................................................................................................................................
 
- / UPDATE COOLRUNE /
+ / UPDATE ALGIZ /
 
- . update-coolrune
+ . update-algiz
  
- - This command updates CoolRune to it's newest configuration.
+ - This command updates Algiz to it's newest configuration.
 
 ..................................................................................................................................................
 
@@ -152,7 +152,7 @@
 
  . ks
  
- - This command finds keywords in a directory quickly in realtime.
+ - This command finds keywords in a directory quickly.
 
 ..................................................................................................................................................
 
@@ -324,11 +324,11 @@
  
 ..................................................................................................................................................
 
- / FIX COOLRUNE /
+ / REPAIR SYSTEM /
  
- . fix-coolrune
+ . repair-system
  
- - This command is a troubleshooting tool for CoolRune.
+ - This command is a troubleshooting tool for Algiz.
  
 ..................................................................................................................................................
 
@@ -380,9 +380,9 @@
 
 ..................................................................................................................................................
 
- / REINSTALL /
+ / REINSTALL-ALL /
  
- . reinstall
+ . reinstall-all
 
  - This command reinstalls all packages in the system.
 
@@ -402,6 +402,14 @@
  
  - This command attempts to recover data from damaged devices and corrupted files.
 
+..................................................................................................................................................
+
+ / META /
+ 
+ . meta
+ 
+ - This script takes a media file path (from an argument or user input) and outputs detailed metadata about the file using ffprobe.
+ 
 ..................................................................................................................................................
 
 ==================================================================================================================================================
@@ -497,6 +505,12 @@
 
 ..................................................................................................................................................
 
+ > WINBOAT ( Run Virtualized Windows Applications)
+
+ . https://github.com/TibixDev/winboat
+
+..................................................................................................................................................
+
 ==================================================================================================================================================
 
 
@@ -514,7 +528,7 @@
 
  > UNIVERSAL ADVICE
 
- . The command [ fix-coolrune ] might fix your problem.
+ . The command [ repair-system ] might fix your problem.
  
  . CTRL + ALT + F1 will bring you into a virtual terminal if needed.
 
@@ -733,7 +747,7 @@
   
   . EX: 2k 27 inch screen is 109 DPI.
   
-  . This setting can be found in appearance > fonts
+  . This setting can be found in Appearance > Fonts
   
 ..................................................................................................................................................
 
