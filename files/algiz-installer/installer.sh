@@ -177,12 +177,12 @@ fi
 
 # NVIDIA-OPENSOURCE-DESKTOP CHOICE
 if [ "$choice" = "5" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 lib32-nvidia-utils nvidia-settings fail2ban fail2ban-s6 nvidia-open-dkms
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 nvidia-settings fail2ban fail2ban-s6 nvidia-open-dkms && paru -S --noconfirm --needed lib32-nvidia-utils || true
 fi
 
 # NVIDIA-PROPRIETARY-DESKTOP CHOICE
 if [ "$choice" = "6" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 lib32-nvidia-utils nvidia-settings fail2ban fail2ban-s6 nvidia-dkms
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 nvidia-settings fail2ban fail2ban-s6 nvidia-dkms && paru -S --noconfirm --needed lib32-nvidia-utils || true
 fi
 
 # INSTALL FLATPAK PACKAGES
