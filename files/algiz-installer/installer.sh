@@ -1,6 +1,30 @@
 #!/bin/bash
 
 su -c '
+### INIT SYSTEM DETECTION ###
+detect_init_system() {
+    if command -v sv >/dev/null 2>&1 && [ -d "/etc/runit" ]; then
+        echo "runit"
+    elif command -v s6-service >/dev/null 2>&1; then
+        echo "s6"
+    elif command -v rc-update >/dev/null 2>&1; then
+        echo "openrc"
+    else
+        # Fallback detection methods
+        if [ -d "/etc/runit" ]; then
+            echo "runit"
+        elif [ -d "/etc/s6" ]; then
+            echo "s6"
+        elif [ -d "/etc/runlevels" ]; then
+            echo "openrc"
+        else
+            echo "unknown"
+        fi
+    fi
+}
+
+INIT_SYSTEM=$(detect_init_system)
+
 ### RETRY LOGIC ###
 retry() {
   local max_attempts="$1"
@@ -89,6 +113,24 @@ retry() {
   done
 }
 
+### SERVICE MANAGEMENT FUNCTIONS ###
+add_service() {
+    local service_name="$1"
+    case "$INIT_SYSTEM" in
+        runit)
+            if [ -d "/etc/runit/sv/$service_name" ]; then
+                ln -sf "/etc/runit/sv/$service_name" "/run/runit/service/"
+            fi
+            ;;
+        s6)
+            s6-service add default "$service_name"
+            ;;
+        openrc)
+            rc-update add "$service_name" default
+            ;;
+    esac
+}
+
 ### ALGIZ LINUX CHOICE SELECTION ###
 
 echo -e "\e[1mSelect a Algiz Linux Variant\e[0m"
@@ -130,7 +172,7 @@ elif [ "$arch_support" = "x86-64-v4" ]; then
 fi
 
 # TEMP FIX
-rm -rf /usr/lib/firmware/nvidia/ad10{3,4,5,6,7} || true && find /etc/pacman.conf -type f -exec sed -i 's/#//g' {} +
+pacman -Rdd --noconfirm linux-firmware || true && find /etc/pacman.conf -type f -exec sed -i 's/#//g' {} +
 
 # POPULATE & REFRESH
 pacman-key --init
@@ -152,7 +194,20 @@ paru -Rdd --noconfirm linux linux-headers pulseaudio pulseaudio-alsa pulseaudio-
 paru -Rdd --noconfirm epiphany xfce4-screensaver xfce4-terminal xfce4-screenshooter parole xfce4-taskmanager mousepad leafpad xfburn ristretto xfce4-appfinder atril xfce4-sensors-plugin xfce4-notes-plugin xfce4-dict xfce4-weather-plugin || true
 
 # INSTALL BASE PACKAGES
-retry 5 paru -S --noconfirm --needed --ignore=vlc,vlc-git,nvidia-390xx-utils,lib32-nvidia-390xx-utils lib32-artix-archlinux-support unrar flatpak kate librewolf tmux liferea ksnip kcalc font-manager pix gimp gamemode lib32-gamemode okular dnscrypt-proxy dnscrypt-proxy-s6 apparmor apparmor-s6 bleachbit konsole catfish clamav clamav-s6 ark gufw macchanger networkmanager networkmanager-s6 nm-connection-editor wine-git wine-mono winetricks-git ufw-s6 steam lynis element-desktop rkhunter appimagelauncher opendoas mate-system-monitor chrony downgrade libreoffice pipewire-pulse pipewire-alsa wireplumber rust usbguard usbguard-s6 chkrootkit wget noto-fonts-emoji tauon-music-box freetube alsa-utils expect inotify-tools preload cpupower cpupower-s6 dialog tree parallel sof-firmware booster bottles vulkan-tools mimalloc mold lld protontricks-git poetry pyenv python-pip hunspell-en_us ccache earlyoom earlyoom-s6 yt-dlp seahorse lib32-libdisplay-info lib32-vulkan-driver mesa-tkg-git lib32-mesa-tkg-git
+retry 5 paru -S --noconfirm --needed lib32-artix-archlinux-support unrar flatpak kate librewolf tmux liferea ksnip kcalc font-manager pix gimp gamemode lib32-gamemode okular dnscrypt-proxy apparmor bleachbit konsole catfish clamav ark gufw macchanger networkmanager nm-connection-editor wine-git wine-mono winetricks-git steam lynis element-desktop rkhunter opendoas mate-system-monitor chrony downgrade libreoffice pipewire-pulse pipewire-alsa wireplumber rust usbguard chkrootkit wget noto-fonts-emoji tauon-music-box freetube alsa-utils expect inotify-tools preload dialog tree parallel sof-firmware booster bottles vulkan-tools mimalloc mold lld protontricks-git poetry pyenv python-pip hunspell-en_us ccache yt-dlp seahorse lib32-libdisplay-info mesa-tkg-git lib32-mesa-tkg-git linux-firmware
+
+# INSTALL INIT PACKAGES
+case "$INIT_SYSTEM" in
+    runit)
+        retry 5 paru -S --noconfirm --needed dnscrypt-proxy-runit apparmor-runit clamav-runit networkmanager-runit ufw-runit usbguard-runit cpupower-runit earlyoom-runit
+        ;;
+    s6)
+        retry 5 paru -S --noconfirm --needed dnscrypt-proxy-s6 apparmor-s6 clamav-s6 networkmanager-s6 ufw-s6 usbguard-s6 cpupower-s6 earlyoom-s6
+        ;;
+    openrc)
+        retry 5 paru -S --noconfirm --needed dnscrypt-proxy-openrc apparmor-openrc clamav-openrc networkmanager-openrc ufw-openrc usbguard-openrc cpupower-openrc earlyoom-openrc
+        ;;
+esac
 
 # INSTALL PYTHON PACKAGES
 retry 5 paru -S --noconfirm --needed python-dateutil python-xlib python-psutil python-pyaudio python-pipenv python-matplotlib python-tqdm python-pillow python-mutagen python-magic python-piexif python-moviepy python-brotli python-websockets python-librosa python-audioread python-pypdf2
@@ -167,22 +222,22 @@ fi
 
 # AMD/INTEL-DESKTOP CHOICE
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git vkbasalt lib32-vkbasalt fail2ban fail2ban-s6
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git vkbasalt lib32-vkbasalt fail2ban fail2ban-${INIT_SYSTEM}
 fi
 
 # AMD/INTEL-LAPTOP CHOICE
 if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
-  retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers throttled tlp tlp-s6 blueman bluez bluez-s6 brightnessctl
+  retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers throttled tlp tlp-${INIT_SYSTEM} blueman bluez bluez-${INIT_SYSTEM} brightnessctl
 fi
 
 # NVIDIA-OPENSOURCE-DESKTOP CHOICE
 if [ "$choice" = "5" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 nvidia-settings fail2ban fail2ban-s6 nvidia-open-dkms && paru -S --noconfirm --needed lib32-nvidia-utils || true
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-${INIT_SYSTEM} nvidia-settings fail2ban fail2ban-${INIT_SYSTEM} nvidia-open-dkms && { paru -S --noconfirm --needed lib32-nvidia-utils || paru -S --noconfirm --needed lib32-vulkan-driver; }
 fi
 
 # NVIDIA-PROPRIETARY-DESKTOP CHOICE
 if [ "$choice" = "6" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 nvidia-settings fail2ban fail2ban-s6 nvidia-dkms && paru -S --noconfirm --needed lib32-nvidia-utils || true
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-${INIT_SYSTEM} nvidia-settings fail2ban fail2ban-${INIT_SYSTEM} nvidia-dkms && { paru -S --noconfirm --needed lib32-nvidia-utils || paru -S --noconfirm --needed lib32-vulkan-driver; }
 fi
 
 # INSTALL FLATPAK PACKAGES
@@ -198,44 +253,57 @@ fi
 
 # AMD/INTEL DESKTOP SELECTION
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  unzip -o algiz-dotfiles.zip -d /home/$USER/
-  unzip -o algiz-main.zip -d /
-  unzip -o algiz-root.zip -d /
-  s6-service add default fail2ban
+  unzip -o algiz-dotfiles-desktop.zip -d /home/$USER/
+  unzip -o algiz-root-main.zip -d /
+  unzip -o algiz-root-desktop.zip -d /
+  add_service fail2ban
 fi
 
 # LAPTOP SELECTION
 if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
   unzip -o algiz-dotfiles-laptop.zip -d /home/$USER/
-  unzip -o algiz-main.zip -d /
+  unzip -o algiz-root-main.zip -d /
   unzip -o algiz-root-laptop.zip -d /
-  s6-service add default tlp
+  add_service tlp
 fi
 
 # NVIDIA SELECTION
 if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
-  unzip -o algiz-dotfiles.zip -d /home/$USER/
-  unzip -o algiz-main.zip -d /
-  unzip -o algiz-root.zip -d /
+  unzip -o algiz-dotfiles-desktop.zip -d /home/$USER/
+  unzip -o algiz-root-main.zip -d /
+  unzip -o algiz-root-desktop.zip -d /
   unzip -o algiz-nvidia-patch.zip -d /
-  s6-service add default fail2ban
+  add_service fail2ban
 fi
 
 ### LAST COMMANDS ###
-s6-service add default apparmor
-s6-service add default NetworkManager
-s6-service add default dnscrypt-proxy
-s6-service add default ufw
-s6-service add default cpupower
-s6-service add default earlyoom
 
-# RESET PERMISSIONS
-reset-permissions
+# ADD SERVICES
+add_service apparmor
+add_service NetworkManager
+add_service dnscrypt-proxy
+add_service ufw
+add_service cpupower
+add_service earlyoom
 
 # REMOVE CONNMAN & REFRESH
-rm /etc/s6/adminsv/default/contents.d/connmand
-pacman -Rdd --noconfirm connman connman-s6 connman-gtk
-s6-db-reload
+case "$INIT_SYSTEM" in
+    runit)
+        unlink /run/runit/service/connmand 2>/dev/null || true
+        pacman -Rdd --noconfirm connman connman-runit connman-gtk
+        reload_services
+        ;;
+    s6)
+        rm -f /etc/s6/adminsv/default/contents.d/connmand
+        pacman -Rdd --noconfirm connman connman-s6 connman-gtk
+        reload_services
+        ;;
+    openrc)
+        rc-update del connman default || true
+        pacman -Rdd --noconfirm connman connman-openrc connman-gtk
+        ;;
+esac
+
 grub-mkconfig -o /boot/grub/grub.cfg
 
 # CREATE GAMEMODE GROUP
@@ -254,6 +322,44 @@ if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ] || [ "$choi
   fi
 fi
 
+# INSTALL UNIVERSAL RC.LOCAL
+
+# Runit
+if [ -d /etc/runit ]; then
+  mkdir -p /etc/runit/sv/rc.local
+  cat > /etc/runit/sv/rc.local/run << 'EOF'
+#!/bin/sh
+exec 2>&1
+/etc/rc.local
+exit 0
+EOF
+  chmod 755 /etc/runit/sv/rc.local/run
+  # Create a finish script to prevent restart
+  cat > /etc/runit/sv/rc.local/finish << 'EOF'
+#!/bin/sh
+# Prevent automatic restart for one-shot service
+exec 2>&1
+exit 0
+EOF
+  chmod 755 /etc/runit/sv/rc.local/finish
+  touch /etc/runit/sv/rc.local/down
+fi
+
+# S6
+if [ -d /etc/s6 ]; then
+  mv -f /etc/rc.local /etc/s6/rc.local
+  chmod 755 /etc/s6/rc.local
+fi
+
+# OpenRC
+if [ -d /etc/runlevels ]; then
+  mv -f /etc/rc.local /etc/local.d/rc.start
+  chmod 755 /etc/local.d/rc.start
+fi
+
+# RESET PERMISSIONS
+reset-permissions
+
 # HARDENING SCRIPT
 sh /algiz/programs/hardening-script/hardening-script.sh && umask 027
 cd /
@@ -261,6 +367,7 @@ cd /
 # EXIT
 mv /etc/profile{,.old}
 grub-install || true
+s6-db-reload || true
 update-grub
 rm -rf /home/algiz-files/
 echo -e "\e[1mAlgiz Linux has been successfully installed\e[0m"

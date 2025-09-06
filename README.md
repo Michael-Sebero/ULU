@@ -10,6 +10,7 @@
 * [CachyOS Kernel](https://wiki.cachyos.org/features/kernel/)
 * [Earlyoom](https://github.com/rfjakob/earlyoom)
 * [GameMode](https://github.com/FeralInteractive/gamemode)
+* [Game Focus](https://github.com/Michael-Sebero/Game-Focus)
 
 ### **Security Software**
 * [AppArmor](https://en.wikipedia.org/wiki/AppArmor)
@@ -36,7 +37,7 @@
 * MAC address randomization.
 * Configured `sysctl` and `limits` for security enhancements, system performance and network efficiency.
 * Low latency [PipeWire](https://github.com/PipeWire/pipewire) audio processing.
-* [ALHP](https://wiki.archlinux.org/title/Unofficial_user_repositories#ALHP), [Chaotic-AUR](https://github.com/chaotic-aur/packages) and [Flatpak](https://flatpak.org/) repositories.
+* [ALHP](https://wiki.archlinux.org/title/Unofficial_user_repositories#ALHP), [Chaotic AUR](https://github.com/chaotic-aur/packages) and [Flatpak](https://flatpak.org/) repositories.
 * Steam [Proton GE](https://github.com/GloriousEggroll/proton-ge-custom) prefix.
 * [ZFS](https://github.com/openzfs/zfs) compatiblity (for server preset only).
 * Optional pre-configured PipeWire audio profiles.
@@ -44,7 +45,7 @@
 * [Booster](https://github.com/anatol/booster) (mkinitcpio replacement).
 * Battery life optimizations for laptops via [TLP](https://github.com/linrunner/TLP).
 * [Mimalloc](https://github.com/microsoft/mimalloc) (high-performance memory allocator).
-* Uses tmpfs to speed up temporary directories and reducing disk I/O.
+* [Tmpfs Overlay](https://github.com/Michael-Sebero/Tmpfs-Overlay) speeds up temporary directories and reduces disk I/O.
 * [Power Manager](https://github.com/Michael-Sebero/Power-Manager) (laptop battery manager).
 
 ## Performance & Security Improvements
@@ -59,13 +60,13 @@
 Algiz Linux implements kernel hardening which increases security and performance. The system prevents privilege escalation attacks through restricted ptrace access and disabled unprivileged BPF operations, while eliminating core dump generation to reduce attack surface. Process handling is optimized for high-concurrency workloads with expanded PID limits and disabled automatic NUMA balancing to prevent unnecessary CPU migrations that degrade cache locality.
 
 ### Memory Management Optimization
-Aggressive memory tuning prioritizes RAM utilization over swap usage, keeping active data in fast memory while optimizing write-back behavior for sustained throughput. The VM subsystem is configured to reduce unnecessary memory compaction overhead while maintaining balanced VFS cache pressure for responsive file operations. HugePages are pre-allocated to eliminate allocation overhead for memory-intensive applications.
+Aggressive memory tuning prioritizes RAM utilization over swap usage, keeping active data in fast memory while optimizing write-back behavior for sustained throughput. The VM subsystem is configured to reduce unnecessary memory compaction overhead while maintaining balanced VFS cache pressure for responsive file operations. HugePages are dynamically allocated on demand, providing up to 3968 large pages to reduce TLB overhead and memory fragmentation for large memory workloads without consuming RAM upfront.
 
 **Zram Integration:** The system configures a zram-based swap device (`/dev/zram0`) to provide fast, compressed virtual memory. Its size is dynamically set to 25% of total RAM. The device is initialized with mkswap and immediately activated with swapon. Compression prioritizes zstd when available, falling back to lzo to maintain low CPU overhead while efficiently storing inactive memory pages. This setup accelerates memory-intensive workloads by reducing disk I/O and keeping more data in RAM.
 
-**TMPFS Overlay Integration:** Temporary directories (`/tmp`, `/var/tmp`, `/var/log`) are mounted as tmpfs to leverage RAM for high-speed file storage. Each mount has a predefined limit (`/tmp` = 5G, `/var/tmp` = 1G, `/var/log` = 512M).
+**TMPFS Overlay Integration:** Temporary directories (`/tmp`, `/var/tmp`, `/var/log`, `/var/cache`, `/home/$USER/.cache/`) are mounted as tmpfs to leverage RAM for high-speed file storage. Each mount has a predefined limit (`/tmp` = 5G, `/var/tmp` = 1G, `/var/log` = 512M, `/var/cache` = 2G, `/home/$USER/.cache` = 2G). Essential directories `/var/cache/pacman`, `/home/$USER/.cache/paru`, `/home/$USER/.cache/nvidia`, `/home/$USER/.cache/mesa_shader_cache`, `/home/$USER/.cache/mesa_shader_cache_db` are excluded and bind-mounted on local storage.
 
-* Periodic cleanup: Removes files older than specified thresholds (5 minutes for `/tmp` and `/var/tmp`).
+* Periodic cleanup: Removes files older than 10 minutes.
 
 * Safe removal: Ensures files in use are never deleted.
 

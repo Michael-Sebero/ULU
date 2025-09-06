@@ -53,11 +53,13 @@
 
  - The [ steal ] command installs packages from the default repo, AUR and Flatpak. It also can download videos.
  
- - On laptops when reaching below 75% battery life will allow charging the battery up to 79%. 
+ - On laptops the maximum charge is 79% to preserve the battery.
+ 
+ - Expect slower application launches on laptop until preloader caches frequently used applications.
  
  - Adjust your screen brightness to 60% to conserve battery life.
  
- - When connecting a charger to a laptop system performance will increase.
+ - When connecting a charger to a laptop, system performance will increase when the battery is at 79%.
 
  - Change shaders to Vulkan in Steam settings and enable Steam Play for Linux compatibility.
 
@@ -109,6 +111,10 @@
  - This command will download system packages, music, videos and livestreams. 
  
  - You can download multiple URLs if they're separated by spaces.
+ 
+ . steal-latest [ PACKAGE ]
+ 
+ - This command doesn't cycle, used for rare package version conflicts.
  
 ..................................................................................................................................................
 
@@ -761,7 +767,7 @@
 
  > LAUNCH OPTIONS FOR SPECIFIC GAMES
  
- Cyberpunk 2077: WINEDLLOVERRIDES="winmm=n,b;version=n,b" gamemoderun %command% --launcher-skip -modded
+  . Cyberpunk 2077: WINEDLLOVERRIDES="winmm=n,b;version=n,b" gamemoderun %command% --launcher-skip -modded
  
 ..................................................................................................................................................
 
