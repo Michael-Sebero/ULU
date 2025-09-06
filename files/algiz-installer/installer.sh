@@ -167,22 +167,22 @@ fi
 
 # AMD/INTEL-DESKTOP CHOICE
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed --overwrite='*' linux-cachyos linux-cachyos-headers protonup-git vkbasalt lib32-vkbasalt fail2ban fail2ban-s6 mesa-tkg-git lib32-mesa-tkg-git
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git vkbasalt lib32-vkbasalt fail2ban fail2ban-s6 mesa-tkg-git lib32-mesa-tkg-git
 fi
 
 # AMD/INTEL-LAPTOP CHOICE
 if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
-  retry 5 paru -S --noconfirm --needed --overwrite='*' linux-cachyos linux-cachyos-headers throttled tlp tlp-s6 blueman bluez bluez-s6 brightnessctl mesa-tkg-git lib32-mesa-tkg-git
+  retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers throttled tlp tlp-s6 blueman bluez bluez-s6 brightnessctl mesa-tkg-git lib32-mesa-tkg-git
 fi
 
 # NVIDIA-OPENSOURCE-DESKTOP CHOICE
 if [ "$choice" = "5" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed --overwrite='*' linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 lib32-nvidia-utils nvidia-settings fail2ban fail2ban-s6 nvidia-open-dkms
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 lib32-nvidia-utils nvidia-settings fail2ban fail2ban-s6 nvidia-open-dkms
 fi
 
 # NVIDIA-PROPRIETARY-DESKTOP CHOICE
 if [ "$choice" = "6" ]; then
-  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed --overwrite='*' linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 lib32-nvidia-utils nvidia-settings fail2ban fail2ban-s6 nvidia-dkms
+  paru -Rdd --noconfirm xfce4-power-manager xfce4-battery-plugin && retry 5 paru -S --noconfirm --needed linux-cachyos linux-cachyos-headers protonup-git nvidia-utils nvidia-utils-s6 lib32-nvidia-utils nvidia-settings fail2ban fail2ban-s6 nvidia-dkms
 fi
 
 # INSTALL FLATPAK PACKAGES
