@@ -12,7 +12,7 @@ retry() {
   do
     if (( attempt_num == max_attempts ))
     then
-      echo "Attempt $attempt_num failed! Trying to continue with available packages..." >&2
+      echo "Attempt $attempt_num failed! Filtering out unavailable packages and retrying..." >&2
       
       # Extract package names and detect package manager
       local pkg_list=""
@@ -39,48 +39,46 @@ retry() {
       fi
       if echo "$command" | grep -q -- "--overwrite="; then
         local overwrite_flag=$(echo "$command" | grep -o -- "--overwrite=[^ ]*")
-        if [[ "$extra_flags" == *"--overwrite="* ]]; then
-          : # already captured
-        else
+        if [[ "$extra_flags" != *"--overwrite="* ]]; then
           extra_flags="$extra_flags $overwrite_flag"
         fi
       fi
       
-      # Get list of unavailable packages
-      echo "Testing package availability with $pkg_manager, please wait..." >&2
+      # Get list of available packages
+      echo "Checking package availability with $pkg_manager..." >&2
       local all_pkgs=($pkg_list)
       local available_pkgs=""
-      local failed_pkgs=""
+      local unavailable_pkgs=""
       
       for pkg in "${all_pkgs[@]}"; do
         if [ -z "$pkg" ]; then continue; fi
         
-        # Use pacman -Sp to check availability regardless of the package manager
-        # since both paru and pacman can check package existence this way
-        if pacman -Sp "$pkg" &>/dev/null; then
+        # Check if package exists in repositories
+        if $pkg_manager -Si "$pkg" &>/dev/null; then
           available_pkgs="$available_pkgs $pkg"
         else
-          failed_pkgs="$failed_pkgs $pkg"
+          unavailable_pkgs="$unavailable_pkgs $pkg"
         fi
       done
       
       # Trim whitespace
       available_pkgs=$(echo "$available_pkgs" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")
-      failed_pkgs=$(echo "$failed_pkgs" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")
+      unavailable_pkgs=$(echo "$unavailable_pkgs" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")
       
-      if [ -n "$failed_pkgs" ]; then
-        echo "Skipping unavailable packages: $failed_pkgs" >&2
+      if [ -n "$unavailable_pkgs" ]; then
+        echo "Skipping unavailable packages: $unavailable_pkgs" >&2
       fi
       
       if [ -n "$available_pkgs" ]; then
-        # Reconstruct the command with available packages
+        # Reconstruct the command with available packages only
         local new_cmd="$pkg_manager $base_flags $extra_flags $available_pkgs"
-        echo "Executing modified command: $new_cmd" >&2
+        echo "Installing available packages: $available_pkgs" >&2
+        echo "Executing: $new_cmd" >&2
         
         # Execute the modified command
-        eval $new_cmd && return 0 || return 1
+        eval "$new_cmd" && return 0 || return 1
       else
-        echo "No available packages found, continuing..." >&2
+        echo "No available packages found, skipping installation..." >&2
         return 0
       fi
     else
