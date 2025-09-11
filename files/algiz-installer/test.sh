@@ -113,13 +113,12 @@ retry() {
   done
 }
 
-### SERVICE MANAGEMENT FUNCTIONS ###
 add_service() {
     local service_name="$1"
     case "$INIT_SYSTEM" in
         runit)
             if [ -d "/etc/runit/sv/$service_name" ]; then
-                ln -sf "/etc/runit/sv/$service_name" "/run/runit/service/"
+                ln -sfn "/etc/runit/sv/$service_name" "/run/runit/service/$service_name"
             fi
             ;;
         s6)
@@ -189,13 +188,6 @@ mv /home/algiz-files/files/algiz-manual/Manual /home/$USER/Desktop/
 
 # REMOVE PACKAGES
 paru -Rdd --noconfirm linux linux-headers pulseaudio pulseaudio-alsa pulseaudio-bluetooth pulseaudio-zeroconf artix-branding-base artix-grub-theme mpv mesa vulkan-intel vulkan-radeon vulkan-swrast
-
-# REMOVE LEGACY NVIDIA UTILS IF INSTALLED
-for pkg in nvidia-390xx-utils lib32-nvidia-390xx-utils; do
-    if pacman -Qs "^$pkg$" > /dev/null; then
-        paru -Rdd --noconfirm "$pkg"
-    fi
-done
 
 # REMOVE XFCE PACKAGES
 paru -Rdd --noconfirm epiphany xfce4-screensaver xfce4-terminal xfce4-screenshooter parole xfce4-taskmanager mousepad leafpad xfburn ristretto xfce4-appfinder atril xfce4-sensors-plugin xfce4-notes-plugin xfce4-dict xfce4-weather-plugin || true
@@ -330,25 +322,7 @@ fi
 # INSTALL UNIVERSAL RC.LOCAL
 
 # Runit
-if [ -d /etc/runit ]; then
-  mkdir -p /etc/runit/sv/rc.local
-  cat > /etc/runit/sv/rc.local/run << 'EOF'
-#!/bin/sh
-exec 2>&1
-/etc/rc.local
-exit 0
-EOF
-  chmod 755 /etc/runit/sv/rc.local/run
-  # Create a finish script to prevent restart
-  cat > /etc/runit/sv/rc.local/finish << 'EOF'
-#!/bin/sh
-# Prevent automatic restart for one-shot service
-exec 2>&1
-exit 0
-EOF
-  chmod 755 /etc/runit/sv/rc.local/finish
-  touch /etc/runit/sv/rc.local/down
-fi
+
 
 # S6
 if [ -d /etc/s6 ]; then
