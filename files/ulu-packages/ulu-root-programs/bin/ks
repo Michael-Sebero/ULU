@@ -1,0 +1,265 @@
+#!/bin/bash
+
+# Colors for better readability
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Function to display usage
+usage() {
+    echo -e "${YELLOW}Usage:${NC}"
+    echo -e "  ./ks [directory] [keyword]"
+    echo -e "  ./ks [options]"
+    echo -e ""
+    echo -e "${YELLOW}Examples:${NC}"
+    echo -e "  ./ks /your/directory keyword"
+    echo -e "  ./ks '/home/user/Downloads/New Folder/' keyword"
+    echo -e "  ./ks /your/directory \"multi word keyword\""
+    echo -e "  ./ks . keyword                    # Search current directory"
+    echo -e ""
+    echo -e "${YELLOW}Options:${NC}"
+    echo -e "  -k, --keyword      Specify keyword directly"
+    echo -e "  -d, --directory    Specify directory directly"
+    echo -e "  -e, --extension    Specify file extension(s) to search (default: all files)"
+    echo -e "  -b, --binary       Include binary files in search (default: text files only)"
+    echo -e "  -i, --ignore-case  Case insensitive search"
+    echo -e "  -r, --regex        Use regular expressions"
+    echo -e "  -w, --word         Match whole words only"
+    echo -e "  -h, --help         Display this help message"
+    exit 1
+}
+
+# Initialize variables
+GREP_OPTS="-n --color=always"
+BINARY_INCLUDE=0
+KEYWORD=""
+DIRECTORY=""
+EXTENSION=""
+
+# Check for simple usage first: ./ks [directory] [keyword]
+if [ $# -eq 2 ] && [[ $1 != -* ]]; then
+    # Remove trailing slash if present
+    DIRECTORY="${1%/}"
+    KEYWORD="$2"
+elif [ $# -eq 1 ] && [[ $1 != -* ]]; then
+    # Single argument could be keyword (search current dir) or directory
+    if [ -d "$1" ]; then
+        # Remove trailing slash if present
+        DIRECTORY="${1%/}"
+    else
+        KEYWORD="$1"
+        DIRECTORY="$(pwd)"
+    fi
+else
+    # Process command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -k|--keyword)
+                KEYWORD="$2"
+                shift 2
+                ;;
+            -d|--directory)
+                # Remove trailing slash if present
+                DIRECTORY="${2%/}"
+                shift 2
+                ;;
+            -e|--extension)
+                EXTENSION="$2"
+                shift 2
+                ;;
+            -b|--binary)
+                BINARY_INCLUDE=1
+                shift
+                ;;
+            -i|--ignore-case)
+                GREP_OPTS="$GREP_OPTS -i"
+                shift
+                ;;
+            -r|--regex)
+                GREP_OPTS="$GREP_OPTS -E"
+                shift
+                ;;
+            -w|--word)
+                GREP_OPTS="$GREP_OPTS -w"
+                shift
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                echo -e "${RED}Unknown option: $1${NC}"
+                usage
+                ;;
+        esac
+    done
+fi
+
+# Ask for keyword if not provided
+if [ -z "$KEYWORD" ]; then
+    echo -ne "${YELLOW}Enter keyword to search: ${NC}"
+    read -r KEYWORD
+fi
+
+# Exit if no keyword provided
+if [ -z "$KEYWORD" ]; then
+    echo -e "${RED}Error: No keyword provided${NC}"
+    exit 1
+fi
+
+# Ask for directory if not provided
+if [ -z "$DIRECTORY" ]; then
+    echo -ne "${YELLOW}Enter directory to search (default: current directory): ${NC}"
+    read -r DIRECTORY
+    DIRECTORY=${DIRECTORY:-$(pwd)}
+    
+    # Remove trailing slash if present
+    DIRECTORY="${DIRECTORY%/}"
+fi
+
+# Validate directory
+if [ ! -d "$DIRECTORY" ]; then
+    echo -e "${RED}Error: Directory '$DIRECTORY' not found${NC}"
+    exit 1
+fi
+
+# Prepare find command based on options
+FIND_CMD="find \"$DIRECTORY\" -type f"
+if [ -n "$EXTENSION" ]; then
+    # Handle multiple extensions separated by comma
+    if [[ "$EXTENSION" == *","* ]]; then
+        IFS=',' read -ra EXTENSIONS <<< "$EXTENSION"
+        FIND_CMD="$FIND_CMD \\("
+        for i in "${!EXTENSIONS[@]}"; do
+            if [ $i -gt 0 ]; then
+                FIND_CMD="$FIND_CMD -o"
+            fi
+            FIND_CMD="$FIND_CMD -name \"*.${EXTENSIONS[$i]}\""
+        done
+        FIND_CMD="$FIND_CMD \\)"
+    else
+        FIND_CMD="$FIND_CMD -name \"*.$EXTENSION\""
+    fi
+fi
+
+# Count total files to process
+TOTAL_FILES=$(eval "$FIND_CMD" 2>/dev/null | wc -l)
+echo -e "${BLUE}Searching for '${GREEN}$KEYWORD${BLUE}' in ${GREEN}$TOTAL_FILES${BLUE} files in directory: ${GREEN}$DIRECTORY${NC}"
+echo -e "${BLUE}Binary files: ${GREEN}$([ $BINARY_INCLUDE -eq 1 ] && echo "Included" || echo "Excluded")${NC}"
+echo -e "${BLUE}===============================================================${NC}"
+
+# Initialize counters
+PROCESSED=0
+FOUND_COUNT=0
+FOUND_FILES=0
+START_TIME=$(date +%s)
+
+# Create a temporary directory to store counter files
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+echo 0 > "$TEMP_DIR/processed"
+echo 0 > "$TEMP_DIR/found_files"
+echo 0 > "$TEMP_DIR/found_count"
+
+# Function to update progress
+update_progress() {
+    local processed=$1
+    local found_files=$2
+    local total_files=$3
+    local progress=$((processed * 100 / total_files))
+    if [ $progress -gt 100 ]; then
+        progress=100
+    fi
+    
+    printf "\r${BLUE}Progress: [${GREEN}%3d%%${BLUE}] Processed: ${GREEN}%d${BLUE}/${GREEN}%d${BLUE} files | Found in: ${GREEN}%d${BLUE} files${NC}" \
+        $progress $processed $total_files $found_files
+}
+
+# Export variables for subshells
+export KEYWORD TEMP_DIR GREP_OPTS BINARY_INCLUDE GREEN YELLOW BLUE RED NC
+
+# Use find with parallel processing for faster searching
+eval "$FIND_CMD" 2>/dev/null | while IFS= read -r FILE; do
+    # Check if file is binary
+    IS_BINARY=0
+    if file "$FILE" 2>/dev/null | grep -q "binary"; then
+        IS_BINARY=1
+    fi
+    
+    # Skip binary files if not included
+    if [ $IS_BINARY -eq 1 ] && [ $BINARY_INCLUDE -eq 0 ]; then
+        # Update processed counter atomically
+        (
+            flock -x 200
+            PROCESSED=$(cat "$TEMP_DIR/processed")
+            echo $((PROCESSED + 1)) > "$TEMP_DIR/processed"
+            FOUND_FILES=$(cat "$TEMP_DIR/found_files")
+            update_progress $((PROCESSED + 1)) $FOUND_FILES $TOTAL_FILES
+        ) 200>"$TEMP_DIR/lock"
+    else
+        # Search in the file
+        if [ $IS_BINARY -eq 1 ]; then
+            RESULTS=$(grep -a $GREP_OPTS "$KEYWORD" "$FILE" 2>/dev/null)
+        else
+            RESULTS=$(grep $GREP_OPTS "$KEYWORD" "$FILE" 2>/dev/null)
+        fi
+        
+        # Update counters atomically
+        (
+            flock -x 200
+            PROCESSED=$(cat "$TEMP_DIR/processed")
+            echo $((PROCESSED + 1)) > "$TEMP_DIR/processed"
+            
+            if [ -n "$RESULTS" ]; then
+                # Update found files counter
+                FOUND_FILES=$(cat "$TEMP_DIR/found_files")
+                echo $((FOUND_FILES + 1)) > "$TEMP_DIR/found_files"
+                
+                # Count matches
+                MATCHES=$(echo "$RESULTS" | wc -l)
+                FOUND_COUNT=$(cat "$TEMP_DIR/found_count")
+                echo $((FOUND_COUNT + MATCHES)) > "$TEMP_DIR/found_count"
+                
+                # Print results (clear progress line first)
+                printf "\r%*s\r" 80 ""
+                echo -e "\n${GREEN}File: ${YELLOW}$FILE${NC}"
+                if [ $IS_BINARY -eq 1 ]; then
+                    echo -e "${RED}(Binary file)${NC}"
+                fi
+                
+                # Process and display each matching line
+                echo "$RESULTS" | while IFS= read -r RESULT_LINE; do
+                    LINE_NUM=$(echo "$RESULT_LINE" | cut -d":" -f1)
+                    CONTENT=$(echo "$RESULT_LINE" | cut -d":" -f2-)
+                    echo -e "${BLUE}Line ${GREEN}$LINE_NUM${BLUE}:${NC} $CONTENT"
+                done
+                
+                FOUND_FILES=$((FOUND_FILES + 1))
+            else
+                FOUND_FILES=$(cat "$TEMP_DIR/found_files")
+            fi
+            
+            update_progress $((PROCESSED + 1)) $FOUND_FILES $TOTAL_FILES
+        ) 200>"$TEMP_DIR/lock"
+    fi
+done
+
+# Read final counters
+PROCESSED=$(cat "$TEMP_DIR/processed")
+FOUND_FILES=$(cat "$TEMP_DIR/found_files")
+FOUND_COUNT=$(cat "$TEMP_DIR/found_count")
+
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# Display summary
+echo -e "\n\n${BLUE}===============================================================${NC}"
+echo -e "${GREEN}Search completed in ${YELLOW}$DURATION${GREEN} seconds${NC}"
+echo -e "${GREEN}Total matches: ${YELLOW}$FOUND_COUNT${GREEN} in ${YELLOW}$FOUND_FILES${GREEN} files${NC}"
+echo -e "${GREEN}Processed ${YELLOW}$PROCESSED${GREEN} files${NC}"
+
+if [ $FOUND_FILES -eq 0 ]; then
+    echo -e "${RED}No matches found for '${YELLOW}$KEYWORD${RED}'${NC}"
+fi

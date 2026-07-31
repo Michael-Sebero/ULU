@@ -1,0 +1,47 @@
+#!/bin/bash
+
+names=("Archivist Tools" "Document Tools" "Audio Frequency Tools" "Media Tools" "Quit")
+cmds=("python3 /home/$USER/Tools/archivist-tools.py" "python3 /home/$USER/Tools/document-tools.py" "python3 /home/$USER/Tools/audio-frequency-tools.py" "python3 /home/$USER/Tools/media-tools.py")
+
+selected=0
+
+drain_input() {
+    while read -rsn 1 -t 0.01 _; do :; done
+}
+
+draw() {
+    clear
+    echo -e "\033[1m  Tool Suite\033[0m\n"
+    for i in "${!names[@]}"; do
+        if [ "$i" -eq "$selected" ]; then
+            echo -e "\033[1m➤ ${names[$i]}\033[0m\n"
+        else
+            echo -e "  ${names[$i]}\n"
+        fi
+    done
+}
+
+while true; do
+    draw
+    read -rsn 1 key
+    case $key in
+        $'\x1b')
+            read -rsn 2 -t 0.1 rest
+            case $rest in
+                '[A') selected=$(( (selected - 1 + ${#names[@]}) % ${#names[@]} )) ;;
+                '[B') selected=$(( (selected + 1) % ${#names[@]} )) ;;
+            esac
+            ;;
+        "")
+            if [ "$selected" -eq $(( ${#names[@]} - 1 )) ]; then
+                echo -e "\n\033[1mExiting script\033[0m"
+                exit 0
+            else
+                stty sane 2>/dev/null
+                ${cmds[$selected]}
+                stty sane 2>/dev/null
+                drain_input
+            fi
+            ;;
+    esac
+done

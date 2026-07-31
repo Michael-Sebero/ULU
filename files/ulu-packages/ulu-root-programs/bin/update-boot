@@ -1,0 +1,62 @@
+#!/bin/bash
+# Rebuild boot entries from /etc/default/grub: grub.cfg, plus Limine through
+# limine-sync when the installer set it up. boot-params runs first so encrypted,
+# LVM, RAID and btrfs-subvolume roots keep their parameters (/etc/default/grub.local).
+
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v doas >/dev/null 2>&1; then
+        exec doas "$0" "$@"
+    fi
+    exec sudo "$0" "$@"
+fi
+
+status=0
+
+booster_yaml_before=$(cat /etc/booster.yaml 2>/dev/null)
+if command -v boot-params >/dev/null 2>&1; then
+    boot-params || echo "update-boot: boot-params reported a root booster can't open; keeping the current initramfs settings" >&2
+fi
+
+# New booster settings (LVM, vconsole, keyfile) only take effect in rebuilt images
+if command -v booster >/dev/null 2>&1 && [ "$booster_yaml_before" != "$(cat /etc/booster.yaml 2>/dev/null)" ]; then
+    echo "update-boot: /etc/booster.yaml changed, rebuilding booster images"
+    for img in /boot/booster-*.img /boot/initramfs-*.img; do
+        [ -f "$img" ] && [ ! -L "$img" ] || continue
+        kver=$(booster cat "$img" etc/booster.init.yaml 2>/dev/null | sed -n 's/^kernel:[[:space:]]*//p' | tr -d "\"'")
+        [ -n "$kver" ] && [ -d "/usr/lib/modules/$kver" ] || continue
+        if booster build --force --kernel-version "$kver" "$img.new" && boot-params --check "$img.new" "$kver" >/dev/null; then
+            mv -f "$img.new" "$img"
+        else
+            rm -f "$img.new"
+            echo "update-boot: kept the previous $img" >&2
+            status=1
+        fi
+    done
+fi
+
+if command -v grub-mkconfig >/dev/null 2>&1 && [ -d /boot/grub ]; then
+    grub-mkconfig -o /boot/grub/grub.cfg || status=1
+elif command -v update-grub >/dev/null 2>&1; then
+    update-grub || status=1
+fi
+
+sync=/usr/local/bin/limine-sync
+if [ -x "$sync" ]; then
+    # limine-sync from older installs has the cmdline baked in instead of reading /etc/default/grub
+    if ! grep -q /etc/default/grub "$sync"; then
+        extra=$(. /etc/default/grub && echo "$GRUB_CMDLINE_LINUX_DEFAULT $GRUB_CMDLINE_LINUX")
+        cmdline="root=UUID=$(findmnt -no UUID --target /) rw $extra"
+        cmdline=${cmdline//\\/\\\\}
+        cmdline=${cmdline//&/\\&}
+        cmdline=${cmdline//|/\\|}
+        sed -i "s|\"root=UUID=[^\"]*\"|\"$cmdline\"|" "$sync" || status=1
+    fi
+    "$sync" || status=1
+fi
+
+if [ "$status" -eq 0 ]; then
+    echo "update-boot: PASS"
+else
+    echo "update-boot: FAIL" >&2
+fi
+exit "$status"

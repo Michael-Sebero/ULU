@@ -1,0 +1,282 @@
+#!/bin/bash
+# Work out what the initramfs needs to mount / on this machine (LUKS, LVM,
+# mdraid, btrfs subvolume) and record it where ULU's boot tooling reads it:
+#   /etc/default/grub.local  kernel parameters, sourced at the end of /etc/default/grub
+#   /etc/booster.yaml        enable_lvm, enable_mdraid, vconsole, LUKS keyfile
+#
+# boot-params --check IMAGE KERNEL_VERSION
+#   PASS if the booster image can open an encrypted / (dm-crypt in the image
+#   or built into that kernel), or / isn't encrypted.
+
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v doas >/dev/null 2>&1; then
+        exec doas "$0" "$@"
+    fi
+    exec sudo "$0" "$@"
+fi
+
+grub_local=/etc/default/grub.local
+booster_yaml=/etc/booster.yaml
+cmdline_file=/proc/cmdline
+
+source_of() {
+    local src
+    src=$(findmnt -no SOURCE --target "$1" 2>/dev/null) || return 1
+    printf '%s\n' "${src%%\[*}"
+}
+
+stack_has() {
+    lsblk -nrso TYPE "$1" 2>/dev/null | grep -qx "$2"
+}
+
+root_src=$(source_of /)
+if [ -z "$root_src" ]; then
+    echo "boot-params: FAIL: cannot find the device mounted on /" >&2
+    exit 1
+fi
+
+# Every dm-crypt layer under / has to be LUKS: booster can't open plain dm-crypt
+non_luks_layers() {
+    local name type path pending=""
+    while read -r name type path; do
+        if [ -n "$pending" ]; then
+            [ "$(blkid -p -s TYPE -o value "$path" 2>/dev/null)" = crypto_LUKS ] || echo "$pending"
+            pending=""
+        fi
+        [ "$type" = crypt ] && pending="$name"
+    done < <(lsblk -nrso NAME,TYPE,PATH "$root_src" 2>/dev/null)
+}
+
+if [ "$1" = --check ]; then
+    image="$2" kver="$3"
+    if [ "$(findmnt -no FSTYPE --target /)" = zfs ]; then
+        echo "boot-params: FAIL: ZFS root needs booster's zfs= setup, which ULU doesn't configure" >&2
+        exit 1
+    fi
+    if ! stack_has "$root_src" crypt; then
+        echo "boot-params: PASS: / is not encrypted"
+        exit 0
+    fi
+    bad=$(non_luks_layers)
+    if [ -n "$bad" ]; then
+        echo "boot-params: FAIL: $bad is not LUKS; booster can only unlock LUKS" >&2
+        exit 1
+    fi
+    if grep -q '/dm-crypt\.ko' "/usr/lib/modules/$kver/modules.builtin" 2>/dev/null \
+        || booster ls "$image" 2>/dev/null | grep -Eq 'dm[-_]crypt\.ko'; then
+        echo "boot-params: PASS: $image can unlock /"
+        exit 0
+    fi
+    echo "boot-params: FAIL: $image has no dm-crypt module for kernel $kver" >&2
+    exit 1
+fi
+
+boot_src=$(source_of /boot)
+boot_encrypted=false
+stack_has "$boot_src" crypt && boot_encrypted=true
+
+read -r -a running_cmdline < "$cmdline_file"
+
+# Keyfile for a LUKS device: mkinitcpio's cryptkey=rootfs:PATH, a previous
+# rd.luks.key=UUID=PATH, or the device's /etc/crypttab entry
+keyfile_for() {
+    local uuid="$1" dev="$2" w name cdev ckey rest
+    for w in "${running_cmdline[@]}"; do
+        case "$w" in
+            cryptkey=rootfs:*) printf '%s\n' "${w#cryptkey=rootfs:}"; return ;;
+            rd.luks.key="$uuid"=*) printf '%s\n' "${w#rd.luks.key="$uuid"=}"; return ;;
+        esac
+    done
+    [ -r /etc/crypttab ] || return
+    while read -r name cdev ckey rest; do
+        case "$name" in ''|\#*) continue ;; esac
+        case "$cdev" in
+            UUID="$uuid"|/dev/disk/by-uuid/"$uuid") ;;
+            *) [ "$(readlink -f "$cdev" 2>/dev/null)" = "$(readlink -f "$dev")" ] || continue ;;
+        esac
+        case "$ckey" in
+            /*) printf '%s\n' "$ckey"; return ;;
+        esac
+    done < /etc/crypttab
+}
+
+params=()
+luks_opts=()
+keyfiles=()
+summary=()
+crypt=false lvm=false raid=false status=0
+crypt_name=""
+
+add_luks_opt() {
+    local o
+    for o in "${luks_opts[@]}"; do
+        [ "$o" = "$1" ] && return
+    done
+    luks_opts+=("$1")
+}
+
+# lsblk -s walks from / down to the disks; the line after a crypt device is
+# the device it was opened from
+while read -r name type path; do
+    if [ -n "$crypt_name" ]; then
+        luks_uuid=$(blkid -p -s UUID -o value "$path" 2>/dev/null)
+        luks_type=$(blkid -p -s TYPE -o value "$path" 2>/dev/null)
+        if [ "$luks_type" = crypto_LUKS ] && [ -n "$luks_uuid" ]; then
+            # booster reads rd.luks.name, dracut (Void fallback) reads rd.luks.uuid
+            params+=("rd.luks.name=$luks_uuid=$crypt_name" "rd.luks.uuid=$luks_uuid")
+            summary+=("LUKS $crypt_name on $path")
+
+            # Keep the dm-crypt flags the volume is open with now (discards etc.)
+            table=" $(dmsetup table "$crypt_name" 2>/dev/null) "
+            for flag in allow_discards same_cpu_crypt submit_from_crypt_cpus no_read_workqueue no_write_workqueue; do
+                case "$table" in
+                    *" $flag "*)
+                        if [ "$flag" = allow_discards ]; then
+                            add_luks_opt discard
+                        else
+                            add_luks_opt "${flag//_/-}"
+                        fi
+                        ;;
+                esac
+            done
+
+            # An initramfs keyfile only stays secret while /boot is encrypted
+            key=$(keyfile_for "$luks_uuid" "$path")
+            if [ -n "$key" ]; then
+                if ! $boot_encrypted; then
+                    echo "boot-params: not embedding keyfile $key: /boot is not encrypted, the passphrase will be asked instead" >&2
+                elif [ -x /usr/local/bin/limine-sync ]; then
+                    echo "boot-params: not embedding keyfile $key: Limine copies the initramfs to the unencrypted boot partition" >&2
+                elif [ ! -f "$key" ] || [[ $key == *[[:space:]]* ]]; then
+                    echo "boot-params: keyfile $key is missing or has spaces in its path, skipping it" >&2
+                else
+                    params+=("rd.luks.key=$luks_uuid=$key")
+                    keyfiles+=("$key")
+                fi
+            fi
+        else
+            echo "boot-params: FAIL: $crypt_name is ${luks_type:-unknown}, not LUKS; booster can only unlock LUKS" >&2
+            status=1
+        fi
+        crypt_name=""
+    fi
+    case "$type" in
+        crypt) crypt=true; crypt_name="$name" ;;
+        lvm)   lvm=true ;;
+        raid*) raid=true ;;
+    esac
+done < <(lsblk -nrso NAME,TYPE,PATH "$root_src" 2>/dev/null)
+
+if $crypt; then
+    [ ${#luks_opts[@]} -gt 0 ] && params+=("rd.luks.options=$(IFS=,; echo "${luks_opts[*]}")")
+    # mkinitcpio's encrypt hook still needs these if booster is ever replaced; booster ignores them
+    for w in "${running_cmdline[@]}"; do
+        case "$w" in
+            cryptdevice=*|cryptkey=*|crypto=*) params+=("$w") ;;
+        esac
+    done
+fi
+$lvm && summary+=("LVM")
+$raid && summary+=("mdraid")
+
+subvol=""
+if [ "$(findmnt -no FSTYPE --target /)" = btrfs ]; then
+    fsroot=$(findmnt -no FSROOT --target /)
+    if [ -n "$fsroot" ] && [ "$fsroot" != / ]; then
+        subvol="${fsroot#/}"
+        summary+=("btrfs subvolume $subvol")
+    fi
+fi
+
+if [ ${#params[@]} -eq 0 ] && [ -z "$subvol" ] && ! $crypt && ! $boot_encrypted; then
+    rm -f "$grub_local"
+else
+    tmp=$(mktemp "$grub_local.XXXXXX") || exit 1
+    # shellcheck disable=SC2016 # $GRUB_* expand later, when grub-mkconfig or limine-sync sources the file
+    {
+        echo "# Written by boot-params for this machine's storage layout; run it again after"
+        echo "# changing how / is stored. Sourced at the end of /etc/default/grub."
+        if [ ${#params[@]} -gt 0 ]; then
+            printf 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX %s"\n' "${params[*]}"
+        fi
+        if $crypt; then
+            # booster asks for the passphrase on /dev/console, which the kernel binds to the
+            # last console= given. ULU's console=tty2 puts the prompt on a VT that isn't on
+            # screen (black screen, no prompt), so encrypted roots keep the default tty0
+            echo "# The LUKS prompt has to be on the VT that's on screen; drop console=ttyN (N>0)"
+            for var in GRUB_CMDLINE_LINUX GRUB_CMDLINE_LINUX_DEFAULT; do
+                printf '%s=$(printf " %%s \\n" "$%s" | sed -e "s/ console=tty[1-9][0-9]* / /g" -e "s/^ *//" -e "s/ *$//")\n' "$var" "$var"
+            done
+        fi
+        if $boot_encrypted; then
+            echo "GRUB_ENABLE_CRYPTODISK=y"
+        fi
+        if [ -n "$subvol" ]; then
+            echo "# Only one rootflags= may exist: the last one wins and ULU's sets noatime,lazytime"
+            echo 'case " $GRUB_CMDLINE_LINUX_DEFAULT " in'
+            printf '    *" rootflags="*) GRUB_CMDLINE_LINUX_DEFAULT=$(printf "%%s\\n" "$GRUB_CMDLINE_LINUX_DEFAULT" | sed "s|rootflags=\\([^ ]*\\)|rootflags=\\1,subvol=%s|") ;;\n' "$subvol"
+            printf '    *) GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=subvol=%s" ;;\n' "$subvol"
+            echo 'esac'
+        fi
+    } > "$tmp"
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$grub_local"
+fi
+
+yaml_set() {
+    if grep -q "^$1:" "$booster_yaml" 2>/dev/null; then
+        sed -i "s|^$1:.*|$1: $2|" "$booster_yaml"
+    else
+        echo "$1: $2" >> "$booster_yaml"
+    fi
+}
+
+yaml_add_extra_file() {
+    local current
+    current=$(sed -n 's/^extra_files:[[:space:]]*//p' "$booster_yaml" 2>/dev/null)
+    case ",$current," in
+        *",$1,"*) return ;;
+    esac
+    if [ -n "$current" ]; then
+        sed -i "s|^extra_files:.*|extra_files: $current,$1|" "$booster_yaml"
+    else
+        echo "extra_files: $1" >> "$booster_yaml"
+    fi
+}
+
+if command -v booster >/dev/null 2>&1; then
+    $lvm && yaml_set enable_lvm true
+    $raid && yaml_set enable_mdraid true
+
+    if $crypt; then
+        # Type the passphrase with the console keymap, not booster's default US layout
+        if [ ! -f /etc/vconsole.conf ]; then
+            keymap=$(. /etc/conf.d/keymaps 2>/dev/null; echo "${keymap:-}")
+            [ -n "$keymap" ] || keymap=$(. /etc/rc.conf 2>/dev/null; echo "${KEYMAP:-}")
+            [ -n "$keymap" ] && echo "KEYMAP=$keymap" > /etc/vconsole.conf
+        fi
+        [ -f /etc/vconsole.conf ] && yaml_set vconsole true
+    fi
+
+    if [ ${#keyfiles[@]} -gt 0 ]; then
+        for key in "${keyfiles[@]}"; do
+            yaml_add_extra_file "$key"
+        done
+        # booster writes its images world-readable; keep the embedded key away from other users
+        chmod 700 /boot
+    fi
+fi
+
+if [ ${#summary[@]} -gt 0 ]; then
+    joined=$(printf '%s, ' "${summary[@]}")
+    echo "boot-params: / uses ${joined%, }"
+fi
+if [ -f "$grub_local" ]; then
+    echo "boot-params: wrote $grub_local"
+fi
+if [ "$status" -eq 0 ]; then
+    echo "boot-params: PASS"
+else
+    echo "boot-params: FAIL" >&2
+fi
+exit "$status"

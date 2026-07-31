@@ -1,0 +1,15 @@
+# Lowercase keys for older cpupower init scripts; the upstream
+# cpupower.service reads /etc/default/cpupower-service.conf instead.
+
+# Valid governors: ondemand, performance, powersave, conservative, userspace
+governor='performance'
+
+# Limit frequency range. Valid suffixes: Hz, kHz (default), MHz, GHz, THz
+#min_freq="2.5GHz"
+#max_freq="3.5GHz"
+
+# Fixed frequency; requires the userspace governor and replaces governor=
+#freq=
+
+# Intel energy/performance bias, 0 = maximum performance (no effect on AMD)
+perf_bias=0

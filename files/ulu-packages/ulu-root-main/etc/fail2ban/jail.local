@@ -1,0 +1,21 @@
+# Overrides for the distro's jail.conf
+
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = 1h
+findtime = 20m
+maxretry = 3
+backend = auto
+usedns = no
+
+[sshd]
+enabled = true
+bantime = 2h
+findtime = 10m
+# Hosts without a journal or syslog daemon have no sshd log to watch: skip the
+# jail instead of aborting fail2ban, and never fall back to the systemd backend
+skip_if_nologs = true
+systemd_if_nologs = false
+
+[recidive]
+enabled = true

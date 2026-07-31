@@ -1,0 +1,4 @@
+#!/bin/bash
+su -c 'pacman-key --keyserver hkp://keyserver.ubuntu.com:80 --refresh-keys'
+
+

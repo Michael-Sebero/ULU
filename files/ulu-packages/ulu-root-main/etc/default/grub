@@ -1,0 +1,69 @@
+# GRUB boot loader configuration
+
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=3
+GRUB_DISTRIBUTOR=""
+GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 noresume rootflags=noatime,lazytime"
+GRUB_CMDLINE_LINUX="cpufreq.default_governor=performance nowatchdog transparent_hugepage=madvise console=tty2 processor.max_cstate=1 intel_idle.max_cstate=0 threadirqs preempt=full libahci.ignore_sss=1 tsc=reliable clocksource=tsc hpet=disable skew_tick=1 usbcore.autosuspend=-1 workqueue.power_efficient=0 nvme_core.default_ps_max_latency_us=0 lsm=capability,landlock,lockdown,yama,apparmor,bpf amdgpu.mcbp=0 amdgpu.ppfeaturemask=0xffffffff nvidia-drm.modeset=1 amdgpu.gpu_recovery=1 amdgpu.deep_color=1 amd_pstate=active amdgpu.runpm=0 iommu=pt pcie_aspm=off tsx=on kvm-intel.nested=1 kvm-intel.enable_shadow_vmcs=1 kvm-intel.enable_apicv=1"
+
+# Preload both GPT and MBR modules so that they are not missed
+GRUB_PRELOAD_MODULES="part_gpt part_msdos"
+
+# Uncomment to enable booting from LUKS encrypted devices
+GRUB_ENABLE_CRYPTODISK=y
+
+# Set to 'countdown' or 'hidden' to change timeout behavior,
+# press ESC key to display menu.
+GRUB_TIMEOUT_STYLE=menu
+
+# Uncomment to use basic console
+GRUB_TERMINAL_INPUT=console
+
+# Uncomment to disable graphical terminal
+#GRUB_TERMINAL_OUTPUT=console
+
+# The resolution used on graphical terminal
+# note that you can use only modes which your graphic card supports via VBE
+# you can see them in real GRUB with the command `vbeinfo'
+GRUB_GFXMODE=auto
+
+# Uncomment to allow the kernel use the same resolution used by grub
+GRUB_GFXPAYLOAD_LINUX=keep
+
+# Uncomment if you want GRUB to pass to the Linux kernel the old parameter
+# format "root=/dev/" instead of "root=/dev/disk/by-uuid/"
+#GRUB_DISABLE_LINUX_UUID=true
+
+# Uncomment to disable generation of recovery mode menu entries
+GRUB_DISABLE_RECOVERY=true
+
+# Uncomment and set to the desired menu colors.  Used by normal and wallpaper
+# modes only.  Entries specified as foreground/background.
+#GRUB_COLOR_NORMAL="light-blue/black"
+#GRUB_COLOR_HIGHLIGHT="light-cyan/blue"
+
+# Uncomment one of them for the gfx desired, a image background or a gfxtheme
+#GRUB_BACKGROUND="/path/to/wallpaper"
+#GRUB_THEME="/path/to/gfxtheme"
+
+# Uncomment to get a beep at GRUB start
+#GRUB_INIT_TUNE="480 440 1"
+
+# Uncomment to make GRUB remember the last selection. This requires
+# setting 'GRUB_DEFAULT=saved' above.
+#GRUB_SAVEDEFAULT=true
+
+# Uncomment to disable submenus in boot menu
+#GRUB_DISABLE_SUBMENU=y
+
+# Probing for other operating systems is disabled for security reasons. Read
+# documentation on GRUB_DISABLE_OS_PROBER, if still want to enable this
+# functionality install os-prober and uncomment to detect and include other
+# operating systems.
+GRUB_DISABLE_OS_PROBER=false
+
+# Machine-specific parameters for encrypted, LVM, RAID or btrfs-subvolume roots,
+# written by boot-params. Sourced last so ULU upgrades and profiles keep them.
+if [ -r /etc/default/grub.local ]; then
+    . /etc/default/grub.local
+fi

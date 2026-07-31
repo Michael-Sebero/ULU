@@ -1,0 +1,5 @@
+# Non-systemd hosts have no journal, so read sshd's log file instead.
+# The installer removes this file on systemd hosts.
+
+[DEFAULT]
+sshd_backend = auto

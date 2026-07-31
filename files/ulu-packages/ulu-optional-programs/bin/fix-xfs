@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+if ! command -v xfs_repair >/dev/null 2>&1; then
+  echo "xfs_repair not found — install the xfsprogs package first." >&2
+  exit 1
+fi
+
+if [[ $EUID -ne 0 ]]; then
+  exec sudo "$0" "$@"
+fi
+
+mapfile -t xfs_devices < <(blkid -t TYPE=xfs -o device 2>/dev/null)
+
+if [[ ${#xfs_devices[@]} -eq 0 ]]; then
+  echo "No XFS filesystems found."
+  exit 0
+fi
+
+echo "Found ${#xfs_devices[@]} XFS filesystem(s): ${xfs_devices[*]}"
+echo
+
+processed=()
+skipped=()
+
+for dev in "${xfs_devices[@]}"; do
+  echo "=== $dev ==="
+  mnt=$(findmnt -n -f -o TARGET --source "$dev" 2>/dev/null || true)
+
+  if [[ "$mnt" == "/" ]]; then
+    echo "Mounted as / — can't repair a live root filesystem."
+    echo "Boot a rescue/live USB and run: xfs_repair $dev"
+    skipped+=("$dev [root]")
+    echo
+    continue
+  fi
+
+  we_unmounted=0
+  if [[ -n "$mnt" ]]; then
+    echo "Unmounting $mnt..."
+    err_file="/tmp/xfs_umount_err.$$"
+    if ! umount "$mnt" 2>"$err_file"; then
+      echo "Could not unmount (in use?) — skipping."
+      cat "$err_file" 2>/dev/null
+      rm -f "$err_file"
+      skipped+=("$dev [busy]")
+      echo
+      continue
+    fi
+    rm -f "$err_file"
+    we_unmounted=1
+  fi
+
+  xfs_repair "$dev"
+  status=$?
+  processed+=("$dev")
+
+  if [[ "$we_unmounted" -eq 1 ]]; then
+    echo "Remounting $mnt..."
+    mount "$mnt"
+  fi
+
+  if [[ $status -ne 0 ]]; then
+    echo "Note: xfs_repair exited with status $status on $dev — check the output above."
+  fi
+  echo
+done
+
+echo "===== Summary ====="
+echo "Processed: ${processed[*]:-none}"
+echo "Skipped:   ${skipped[*]:-none}"

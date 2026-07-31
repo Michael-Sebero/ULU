@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+#
+# System update script with cross-distro package manager detection.
+#
+# Detected package managers, in the order they're checked:
+#   paru    - Arch / Artix (AUR helper; preferred when present)
+#   pacman  - Arch / Artix (fallback when paru is absent)
+#   xbps    - Void Linux
+#   apt     - Debian, Ubuntu
+#
+# Requires: expect, and either doas or sudo.
+
+if [ -z "$BASH_VERSION" ]; then
+    echo "This script requires bash. Try: bash update" >&2
+    exit 1
+fi
+
+echo -e "\033[1mStarting system update...\033[0m"
+
+# --- Sanity checks ------------------------------------------------------
+
+if ! command -v expect >/dev/null 2>&1; then
+    echo -e "\033[1;31mThe 'expect' package is required but wasn't found.\033[0m"
+    echo "Install it with your package manager, e.g.:"
+    echo "  apt install expect | pacman -S expect | xbps-install expect"
+    exit 1
+fi
+
+if command -v doas >/dev/null 2>&1; then
+    DOAS_BIN="$(command -v doas)"
+    if [ -u "$DOAS_BIN" ]; then
+        PRIV="doas"
+    elif command -v sudo >/dev/null 2>&1; then
+        echo -e "\033[1;33mFound doas, but it isn't installed setuid-root (this is why every escalated command below has been silently failing with 'doas: not installed setuid'). Falling back to sudo instead.\033[0m"
+        echo -e "\033[1;33mTo use doas again, run once: sudo chmod 4755 $DOAS_BIN\033[0m"
+        PRIV="sudo"
+    else
+        echo -e "\033[1;31mdoas was found but isn't installed setuid-root, and no sudo is available either, so privileges can't be escalated.\033[0m"
+        echo "Fix it with (from a root shell, or however you normally get root): chmod 4755 $DOAS_BIN"
+        exit 1
+    fi
+elif command -v sudo >/dev/null 2>&1; then
+    PRIV="sudo"
+else
+    echo -e "\033[1;31mNeither doas nor sudo was found. Cannot escalate privileges.\033[0m"
+    exit 1
+fi
+
+# --- Package manager detection ------------------------------------------
+
+if command -v pacman >/dev/null 2>&1; then
+    if command -v paru >/dev/null 2>&1; then
+        PKG_MGR="paru"
+    else
+        PKG_MGR="pacman"
+    fi
+elif command -v xbps-install >/dev/null 2>&1; then
+    PKG_MGR="xbps"
+elif command -v apt-get >/dev/null 2>&1; then
+    PKG_MGR="apt"
+else
+    echo -e "\033[1;31mNo supported package manager found (pacman, xbps, apt).\033[0m"
+    exit 1
+fi
+
+# Get password once
+# Handed to expect through the environment so quotes, $ or [ are sent literally;
+# each expect script unsets it before spawning anything
+read -rs -p "Enter password: " PASS
+echo
+
+# Maximum number of retry attempts
+MAX_RETRY=3
+RETRY_COUNT=0
+UPDATE_SUCCESS=false
+
+# Build the update command for the detected package manager. paru is left
+# exactly as it was (it self-escalates); every other manager is run through
+# $PRIV. Compound/prefixed commands go through `sh -c` so `&&` and env-var
+# prefixes are parsed correctly by the shell instead of by expect.
+case "$PKG_MGR" in
+    paru)
+        SPAWN_LINE="spawn paru --skipreview -Syyu --needed --overwrite='*'"
+        ;;
+    pacman)
+        SPAWN_LINE="spawn $PRIV pacman -Syyu --needed --overwrite='*'"
+        ;;
+    xbps)
+        # xbps updates itself in its own transaction; run it first so a
+        # self-update doesn't leave the rest of the system half-updated.
+        SPAWN_LINE="spawn sh -c \"$PRIV xbps-install -Suy xbps && $PRIV xbps-install -Suy\""
+        ;;
+    apt)
+        SPAWN_LINE="spawn sh -c \"$PRIV env DEBIAN_FRONTEND=noninteractive apt-get update && $PRIV env DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade\""
+        ;;
+esac
+
+# System updates with retry logic
+while [ $RETRY_COUNT -lt $MAX_RETRY ] && [ "$UPDATE_SUCCESS" = "false" ]; do
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+
+    if [ $RETRY_COUNT -gt 1 ]; then
+        echo -e "\033[1mRetrying system update (attempt $RETRY_COUNT of $MAX_RETRY)...\033[0m"
+        sleep 3
+    fi
+
+    echo -e "\033[1mRunning system update...\033[0m"
+
+    EXPECT_SCRIPT=$(cat <<EOF
+    set ulu_pass \$env(ULU_PASS); unset env(ULU_PASS)
+    set timeout -1
+    log_user 1
+    exp_internal 0
+    
+    $SPAWN_LINE
+    
+    expect {
+        "password*:" {
+            send -- "\$ulu_pass\r"
+            exp_continue
+        }
+        "?Y/n]" {
+            sleep 0.5
+            send "Y\r"
+            exp_continue
+        }
+        "?y/N]" {
+            sleep 0.5
+            send "y\r"
+            exp_continue
+        }
+        "?y/n]" {
+            sleep 0.5
+            send "y\r"
+            exp_continue
+        }
+        "Do you want to remove these .*" {
+            sleep 0.5
+            send "y\r"
+            exp_continue
+        }
+        "Enter a selection (default=all):" {
+            sleep 0.5
+            send "\r"
+            exp_continue
+        }
+        ":: Proceed with installation" {
+            sleep 0.5
+            send "y\r"
+            exp_continue
+        }
+        ":: When installing AUR packages:" {
+            sleep 0.5
+            exp_continue
+        }
+        timeout {
+            puts "Timeout occurred"
+            exit 1
+        }
+        eof
+    }
+EOF
+)
+    
+    echo "$EXPECT_SCRIPT" | ULU_PASS="$PASS" expect 2>&1 | tee /tmp/update_output.log | grep -v -E "spawn|password.*:|expect|warning:|doas: not installed setuid"
+    
+    if grep -Eqi "error:|^E:|doas: not installed setuid" /tmp/update_output.log; then
+        echo -e "\033[1;31mUpdate encountered errors.\033[0m"
+    else
+        UPDATE_SUCCESS=true
+        echo -e "\033[1mSystem packages updated successfully.\033[0m"
+    fi
+    
+    rm -f /tmp/update_output.log
+done
+
+if [ "$UPDATE_SUCCESS" = "false" ]; then
+    echo -e "\033[1;31mFailed to update system packages after $MAX_RETRY attempts.\033[0m"
+    echo -e "\033[1;33mYou may need to manually resolve package conflicts.\033[0m"
+    case "$PKG_MGR" in
+        paru)   echo -e "\033[1;33mTry running 'paru -Syu' manually and check the specific errors.\033[0m" ;;
+        pacman) echo -e "\033[1;33mTry running '$PRIV pacman -Syu' manually and check the specific errors.\033[0m" ;;
+        xbps)   echo -e "\033[1;33mTry running '$PRIV xbps-install -Su' manually and check the specific errors.\033[0m" ;;
+        apt)    echo -e "\033[1;33mTry running '$PRIV apt-get update && $PRIV apt-get dist-upgrade' manually and check the specific errors.\033[0m" ;;
+    esac
+    exit 1
+fi
+
+echo
+
+# Flatpak updates if installed
+if command -v flatpak >/dev/null 2>&1; then
+    flatpak update -y | grep -v "warning:"
+    echo
+fi
+
+# Update Firmware
+if command -v fwupdmgr >/dev/null 2>&1; then
+    fwupdmgr update | grep -v "warning:"
+    echo
+fi
+
+# Update ClamAV virus definitions if installed
+if command -v freshclam >/dev/null 2>&1; then
+    CLAM_SCRIPT=$(cat <<EOF
+    set ulu_pass \$env(ULU_PASS); unset env(ULU_PASS)
+    set timeout -1
+    log_user 1
+    exp_internal 0
+    
+    spawn $PRIV freshclam
+    
+    expect {
+        "password*:" {
+            send -- "\$ulu_pass\r"
+            exp_continue
+        }
+        timeout {
+            puts "Timeout occurred"
+            exit 1
+        }
+        eof
+    }
+EOF
+)
+    echo "$CLAM_SCRIPT" | ULU_PASS="$PASS" expect 2>&1 | grep -v -E "spawn|password.*:|expect|warning:|doas: not installed setuid"
+    echo
+fi
+
+# Update Proton-GE
+if command -v protonup >/dev/null 2>&1; then
+    if ! protonup -y 2>/tmp/protonup_err.log | grep -v "warning:"; then
+        echo -e "\033[1;33mProton-GE update failed (likely an interrupted download leaving a partial install behind).\033[0m"
+        tail -n 1 /tmp/protonup_err.log
+    fi
+    rm -f /tmp/protonup_err.log
+    echo
+fi
+
+echo -e "\033[1mUpdate completed\033[0m"
+
+# Reinstall any packages with genuinely missing files
+echo -e "\033[1mChecking for missing package files...\033[0m"
+
+case "$PKG_MGR" in
+    paru|pacman)
+        BROKEN=$(pacman -Qk 2>&1 1>/dev/null | grep "warning:" | grep "No such file or directory" | grep -v "/var/cache/")
+        if [ -n "$BROKEN" ]; then
+            echo -e "\033[1;33mMissing files detected, reinstalling affected packages...\033[0m"
+            echo "$BROKEN" | sed "s/warning: //;s/:.*//" | sort -u > /tmp/broken_pkgs.txt
+            PKGS=$(comm -12 <(sort /tmp/broken_pkgs.txt) <(pacman -Slq | sort) | tr '\n' ' ')
+            if [ -n "$PKGS" ]; then
+                REINSTALL_SCRIPT=$(cat <<EOF
+    set ulu_pass \$env(ULU_PASS); unset env(ULU_PASS)
+    set timeout -1
+    log_user 1
+    exp_internal 0
+
+    spawn $PRIV pacman -S --overwrite "*" --noconfirm $PKGS
+
+    expect {
+        "password*:" {
+            send -- "\$ulu_pass\r"
+            exp_continue
+        }
+        timeout {
+            puts "Timeout occurred"
+            exit 1
+        }
+        eof
+    }
+EOF
+)
+                echo "$REINSTALL_SCRIPT" | ULU_PASS="$PASS" expect 2>&1 | tee /tmp/reinstall_output.log | grep -v -E "spawn|password.*:|expect|warning:|doas: not installed setuid"
+                if grep -Eqi "error:|doas: not installed setuid" /tmp/reinstall_output.log; then
+                    echo -e "\033[1;31mReinstall failed: $(cat /tmp/broken_pkgs.txt)\033[0m"
+                else
+                    echo -e "\033[1mFixed: $(cat /tmp/broken_pkgs.txt)\033[0m"
+                fi
+                rm -f /tmp/reinstall_output.log
+            else
+                echo -e "\033[1mFixed: $(cat /tmp/broken_pkgs.txt)\033[0m"
+            fi
+            rm -f /tmp/broken_pkgs.txt
+        else
+            echo -e "\033[1mNo missing package files found.\033[0m"
+        fi
+        ;;
+
+    xbps)
+        # xbps-pkgdb reports each problem package as "<pkgver>: <issue>".
+        # xbps-uhelper getpkgname normalizes a pkgver string down to the
+        # bare package name that xbps-install expects. This check is a
+        # read-only query (like pacman -Qk and rpm -Va below), so it runs
+        # unprivileged rather than through $PRIV -- a raw doas/sudo call
+        # here would have no way to receive a password, since it isn't
+        # wrapped in expect and stdin was already consumed by the prompt
+        # at the top of this script.
+        BROKEN_RAW=$(xbps-pkgdb -a 2>&1 | grep -Ei "missing|broken|modified" | sed -E 's/^([^:]+):.*/\1/' | sort -u)
+        if [ -n "$BROKEN_RAW" ]; then
+            PKGS=$(echo "$BROKEN_RAW" | xargs -r -I{} xbps-uhelper getpkgname {} 2>/dev/null | sort -u | tr '\n' ' ')
+        else
+            PKGS=""
+        fi
+        if [ -n "$PKGS" ]; then
+            echo -e "\033[1;33mMissing files detected, reinstalling affected packages...\033[0m"
+            REINSTALL_SCRIPT=$(cat <<EOF
+    set ulu_pass \$env(ULU_PASS); unset env(ULU_PASS)
+    set timeout -1
+    log_user 1
+    exp_internal 0
+
+    spawn sh -c "$PRIV xbps-install -f $PKGS"
+
+    expect {
+        "password*:" {
+            send -- "\$ulu_pass\r"
+            exp_continue
+        }
+        "?Y/n]" {
+            sleep 0.5
+            send "Y\r"
+            exp_continue
+        }
+        timeout {
+            puts "Timeout occurred"
+            exit 1
+        }
+        eof
+    }
+EOF
+)
+            echo "$REINSTALL_SCRIPT" | ULU_PASS="$PASS" expect 2>&1 | tee /tmp/reinstall_output.log | grep -v -E "spawn|password.*:|expect|warning:|doas: not installed setuid"
+            if grep -Eqi "error:|doas: not installed setuid" /tmp/reinstall_output.log; then
+                echo -e "\033[1;31mReinstall failed: $PKGS\033[0m"
+            else
+                echo -e "\033[1mFixed: $PKGS\033[0m"
+            fi
+            rm -f /tmp/reinstall_output.log
+        else
+            echo -e "\033[1mNo missing package files found.\033[0m"
+        fi
+        ;;
+
+    apt)
+        if command -v debsums >/dev/null 2>&1; then
+            PKGS=$(debsums -c 2>/dev/null | xargs -r -I{} dpkg -S {} 2>/dev/null | cut -d: -f1 | tr ',' '\n' | sed 's/^ *//;s/ *$//' | sort -u | tr '\n' ' ')
+            if [ -n "$PKGS" ]; then
+                echo -e "\033[1;33mMissing/modified files detected, reinstalling affected packages...\033[0m"
+                REINSTALL_SCRIPT=$(cat <<EOF
+    set ulu_pass \$env(ULU_PASS); unset env(ULU_PASS)
+    set timeout -1
+    log_user 1
+    exp_internal 0
+
+    spawn sh -c "$PRIV env DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y $PKGS"
+
+    expect {
+        "password*:" {
+            send -- "\$ulu_pass\r"
+            exp_continue
+        }
+        timeout {
+            puts "Timeout occurred"
+            exit 1
+        }
+        eof
+    }
+EOF
+)
+                echo "$REINSTALL_SCRIPT" | ULU_PASS="$PASS" expect 2>&1 | tee /tmp/reinstall_output.log | grep -v -E "spawn|password.*:|expect|warning:|doas: not installed setuid"
+                if grep -Eqi "error:|^E:|doas: not installed setuid" /tmp/reinstall_output.log; then
+                    echo -e "\033[1;31mReinstall failed: $PKGS\033[0m"
+                else
+                    echo -e "\033[1mFixed: $PKGS\033[0m"
+                fi
+                rm -f /tmp/reinstall_output.log
+            else
+                echo -e "\033[1mNo missing package files found.\033[0m"
+            fi
+        else
+            echo -e "\033[1mSkipping file-integrity check ('debsums' isn't installed).\033[0m"
+        fi
+        ;;
+esac

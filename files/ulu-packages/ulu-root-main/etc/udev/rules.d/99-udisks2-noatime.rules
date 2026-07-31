@@ -1,0 +1,4 @@
+# noatime for filesystems mounted through udisks2. This sets the common default
+# set, which udisks merges with its per-filesystem defaults (uid/gid for
+# vfat/exfat/ntfs, errors=remount-ro for ext4), so those are kept.
+SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="xfs|ext4|btrfs|f2fs|vfat|exfat|ntfs", ENV{UDISKS_MOUNT_OPTIONS_DEFAULTS}="noatime"

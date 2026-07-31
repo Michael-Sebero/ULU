@@ -1,0 +1,2 @@
+#!/bin/bash
+inotifywait -m -r -e modify --exclude '/sys|/proc|/dev|/tmp' / |   grep -vE '/sys|/proc|/dev|/tmp'

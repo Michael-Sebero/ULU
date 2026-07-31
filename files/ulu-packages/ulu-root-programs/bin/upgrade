@@ -1,0 +1,247 @@
+#!/bin/bash
+
+# Exit on error, undefined vars, and pipe failures
+set -euo pipefail
+
+# CLEANUP
+cleanup() {
+    local exit_code=$?
+    echo "Performing cleanup..."
+    [ -d "/home/ulu-files" ] && rm -rf "/home/ulu-files"
+    # Only reboot if installation was successful
+    if [ $exit_code -eq 0 ] && [ "${INSTALL_COMPLETE:-0}" -eq 1 ]; then
+        echo "Installation complete. Rebooting..."
+        reboot
+    elif [ $exit_code -ne 0 ]; then
+        echo "Installation failed. Please check the error messages above."
+    fi
+}
+
+# Ensure cleanup happens on any exit
+trap cleanup EXIT
+trap 'exit 1' INT TERM ERR
+
+# Check if running as root
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v doas >/dev/null 2>&1; then
+        exec doas "$0" "$@"
+    fi
+    exec sudo "$0" "$@"
+fi
+
+# SCRIPT VOCABULARY / USER MODIFICATION SECTION
+ULU_DIR="/home/ulu-files"
+ULU_PKG_DIR="$ULU_DIR/files/ulu-packages"
+
+# Tools cloned from GitHub and sent to /bin, overwriting the old versions ("Repo:file")
+ULU_EXTERNAL_TOOLS=(
+    "Package-Dictionary:pd"
+    "SCX-IMPERATOR:scx_imperator"
+    "SCX-AURA:scx_aura"
+    "Linux-Hardening-Script:hardening-script"
+    "Ephemeral-Overlay:ephemeral-overlay"
+    "Steal:steal"
+)
+
+### CLONE A GITHUB REPO WITH RETRIES ###
+
+clone_repo() {
+    local repo="$1" dir="$2" attempt
+
+    for attempt in $(seq 1 5); do
+        echo "Cloning $repo (attempt $attempt/5)..." >&2
+        rm -rf "$dir"
+        if GIT_TERMINAL_PROMPT=0 git clone --depth 1 "https://github.com/Michael-Sebero/$repo" "$dir"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 5 ]; then
+            echo "Attempt $attempt failed for $repo, retrying in 5 seconds..." >&2
+            sleep 5
+        fi
+    done
+
+    return 1
+}
+
+### REPLACE ONE FILE AND VERIFY IT ###
+
+replace_file() {
+    local src="$1" dest="$2" mode="$3"
+    local was_immutable=0 installed=0
+
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && lsattr -d "$dest" 2>/dev/null | grep -q '^....i'; then
+        was_immutable=1
+        chattr -i "$dest" 2>/dev/null || true
+    fi
+
+    if install -D -T -m "$mode" "$src" "$dest"; then
+        installed=1
+    fi
+
+    if [ "$was_immutable" -eq 1 ]; then
+        chattr +i "$dest" 2>/dev/null || true
+    fi
+
+    [ "$installed" -eq 1 ] && [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"
+}
+
+### ULU PACKAGE INSTALLATION ###
+
+FAILED_FILES=()
+REPLACED_COUNT=0
+
+install_ulu_package() {
+    local pkg_dir="$ULU_PKG_DIR/$1"
+    local target="$pkg_dir${2:+/$2}"
+    local src rel mode
+    local count=0
+
+    if [ ! -e "$target" ]; then
+        echo "Error: $target does not exist." >&2
+        FAILED_FILES+=("package $1 (missing from the downloaded files)")
+        return 0
+    fi
+
+    echo -e "\e[1mInstalling $1...\e[0m"
+    while IFS= read -r -d "" src; do
+        rel="${src#"$pkg_dir"/}"
+        mode=$(stat -c "%a" "$src")
+        case "$rel" in
+            bin/*) mode=755 ;;
+        esac
+        if replace_file "$src" "/$rel" "$mode"; then
+            count=$((count + 1))
+        else
+            echo "Error: failed to replace /$rel" >&2
+            FAILED_FILES+=("/$rel")
+        fi
+    done < <(find "$target" -type f -print0)
+
+    REPLACED_COUNT=$((REPLACED_COUNT + count))
+    echo "  $count files replaced and verified"
+    return 0
+}
+
+### ULU EXTERNAL TOOLS ###
+
+install_ulu_external_tools() {
+    local entry repo file tmp
+    local failed_tools=()
+
+    tmp=$(mktemp -d) || return 1
+
+    for entry in "${ULU_EXTERNAL_TOOLS[@]}"; do
+        repo="${entry%%:*}"
+        file="${entry#*:}"
+
+        # The mode is set explicitly: hardening-script is committed without the executable bit.
+        if clone_repo "$repo" "$tmp/$repo" && replace_file "$tmp/$repo/$file" "/bin/$file" 755; then
+            echo "Installed /bin/$file"
+        else
+            echo "Failed to install $file from $repo, skipping..." >&2
+            failed_tools+=("$file")
+        fi
+    done
+
+    rm -rf "$tmp"
+
+    if [ "${#failed_tools[@]}" -gt 0 ]; then
+        echo -e "\e[1mThe following tools failed to install and were skipped:\e[0m" >&2
+        for file in "${failed_tools[@]}"; do
+            echo "  - $file" >&2
+        done
+        return 1
+    fi
+}
+
+# ULU CHOICE SELECTION
+echo -e "\e[1mWARNING: Backup your system before updating\e[0m"
+echo -e "\e[1mSelect a ULU Variant\e[0m"
+echo "1. AMD/INTEL Desktop"
+echo "2. NVIDIA Desktop"
+echo "3. AMD/INTEL Laptop"
+
+# Get valid user choice
+while true; do
+    read -p "Enter your choice (1, 2, or 3): " choice
+    if [[ "$choice" =~ ^[123]$ ]]; then
+        break
+    else
+        echo "Invalid choice. Please enter 1, 2, or 3."
+    fi
+done
+
+# Download the ULU files
+if ! command -v git >/dev/null 2>&1; then
+    echo "Error: git is required but is not installed."
+    exit 1
+fi
+
+echo "Downloading ULU files..."
+if ! clone_repo ULU "$ULU_DIR"; then
+    echo "Failed to download ULU files"
+    exit 1
+fi
+
+# Update external tools in /bin (a failed tool keeps its old version and does not stop the upgrade)
+TOOLS_FAILED=0
+install_ulu_external_tools || TOOLS_FAILED=1
+
+# Main and programs files are installed for every choice
+install_ulu_package ulu-root-main
+install_ulu_package ulu-root-programs
+
+# Variant-specific files go on top of them
+case "$choice" in
+    2) install_ulu_package ulu-nvidia-patch ;;   # NVIDIA Desktop
+    3) install_ulu_package ulu-root-laptop ;;    # AMD/INTEL Laptop
+esac
+
+# Every file must be replaced and verified before going any further
+if [ "${#FAILED_FILES[@]}" -gt 0 ]; then
+    echo -e "\e[1mThe following files could NOT be replaced:\e[0m" >&2
+    for f in "${FAILED_FILES[@]}"; do
+        echo "  - $f" >&2
+    done
+    echo "Upgrade stopped before hardening, GRUB and reboot. Fix the problem and run upgrade again." >&2
+    exit 1
+fi
+echo "All $REPLACED_COUNT files replaced and verified."
+
+# rc.local is run from a different path on s6 and OpenRC (same moves as the installer)
+if [ -d /etc/s6 ]; then
+    mv -f /etc/rc.local /etc/s6/rc.local
+    chmod 755 /etc/s6/rc.local
+elif [ -d /etc/runlevels ]; then
+    mv -f /etc/rc.local /etc/local.d/rc.start
+    chmod 755 /etc/local.d/rc.start
+fi
+
+# fail2ban reads the journal on systemd; paths-overrides.local is only for other inits
+if [ -d /run/systemd/system ]; then
+    rm -f /etc/fail2ban/paths-overrides.local
+fi
+
+# Reset Permissions
+if ! reset-permissions; then
+    echo "Failed to set permissions for /etc directory"
+    exit 1
+fi
+
+# Run hardening script (result ignored so the restart always happens)
+echo "Running system hardening script..."
+hardening-script || true
+
+# Regenerate grub.cfg and Limine entries from the new /etc/default/grub
+echo "Updating boot entries..."
+if ! update-boot; then
+    echo "Failed to update boot entries"
+    exit 1
+fi
+
+# Mark installation as complete
+INSTALL_COMPLETE=1
+if [ "$TOOLS_FAILED" -eq 1 ]; then
+    echo -e "\e[1mWarning: some tools were not updated (listed above) and kept their old versions. Re-run upgrade to retry.\e[0m" >&2
+fi
+echo "Installation successful"

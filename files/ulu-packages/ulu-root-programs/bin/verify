@@ -1,0 +1,921 @@
+#!/usr/bin/env bash
+
+# Colors for output
+RED='\e[31m'
+GREEN='\e[32m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+BOLD='\e[1m'
+RESET='\e[0m'
+
+# Debug/verbose mode: prints exactly which signal (init system query vs.
+# process-table fallback) each service check relied on. Survives the
+# re-exec below since "$@" is passed through unchanged.
+VERBOSE=0
+for arg in "$@"; do
+  case "$arg" in
+    -v|--verbose|--debug) VERBOSE=1 ;;
+  esac
+done
+
+### AUTO-ELEVATE TO ROOT ###
+# So the user can just run `verify` and be prompted for their password,
+# instead of having to remember to type sudo themselves.
+if [ "$EUID" -ne 0 ]; then
+  if command -v sudo &>/dev/null; then
+    exec sudo -- "$0" "$@"
+  elif command -v doas &>/dev/null; then
+    exec doas -- "$0" "$@"
+  else
+    echo -e "${RED}ERROR: This script must run as root, and neither sudo nor doas was found.${RESET}"
+    exit 1
+  fi
+fi
+
+# Counters
+INSTALLED=0
+MISSING=0
+SKIPPED=0
+
+echo -e "${BOLD}ULU Installation Verification Script${RESET}\n"
+
+### KERNEL VERSION CHECK ###
+check_kernel_version() {
+  local kernel_version=$(uname -r | cut -d. -f1,2)
+  local major=$(echo "$kernel_version" | cut -d. -f1)
+  local minor=$(echo "$kernel_version" | cut -d. -f2)
+  
+  if [ "$major" -gt 6 ] || ([ "$major" -eq 6 ] && [ "$minor" -ge 12 ]); then
+    return 0
+  else
+    return 1
+  fi
+}
+
+### PACKAGE MANAGER DETECTION ###
+detect_package_manager() {
+  if command -v pacman &> /dev/null; then
+    PKG_MANAGER="pacman"
+    echo -e "${BLUE}Detected package manager: pacman${RESET}"
+  elif command -v apt &> /dev/null; then
+    PKG_MANAGER="apt"
+    echo -e "${BLUE}Detected package manager: apt${RESET}"
+  elif command -v xbps-query &> /dev/null; then
+    PKG_MANAGER="xbps"
+    echo -e "${BLUE}Detected package manager: xbps (Void Linux)${RESET}"
+  else
+    echo -e "${RED}ERROR: No supported package manager found${RESET}"
+    exit 1
+  fi
+}
+
+### INIT SYSTEM DETECTION ###
+# Package manager does NOT imply init system (e.g. Artix uses pacman with
+# openrc/runit/s6/dinit, not just systemd), so this is detected separately
+# and used by verify_service() to check services in an init-agnostic way.
+detect_init_system() {
+  if [ -d /run/systemd/system ]; then
+    INIT_SYSTEM="systemd"
+  elif command -v sv &>/dev/null && { [ -d /etc/runit ] || [ -d /run/runit ] || [ -d /var/service ]; }; then
+    INIT_SYSTEM="runit"
+  elif command -v rc-status &>/dev/null && command -v rc-service &>/dev/null; then
+    INIT_SYSTEM="openrc"
+  elif command -v s6-rc &>/dev/null && { [ -d /etc/s6 ] || [ -d /run/s6 ] || [ -d /etc/s6-rc ]; }; then
+    INIT_SYSTEM="s6"
+  elif command -v dinitctl &>/dev/null; then
+    INIT_SYSTEM="dinit"
+  else
+    INIT_SYSTEM="unknown"
+  fi
+}
+
+### PACKAGE NAME MAPPING ###
+map_package_names() {
+  local base_pkg=$1
+  
+  case "$PKG_MANAGER" in
+    apt)
+      case "$base_pkg" in
+        unrar) echo "unrar" ;;
+        gamemode) echo "gamemode" ;;
+        # 32-bit gamemode lib on Debian/Ubuntu/Mint - requires the i386
+        # multiarch to be enabled first (dpkg --add-architecture i386).
+        lib32-gamemode) echo "libgamemode0:i386" ;;
+        dnscrypt-proxy) echo "dnscrypt-proxy" ;;
+        dnsmasq) echo "dnsmasq" ;;
+        apparmor) echo "apparmor apparmor-utils" ;;
+        gufw) echo "gufw" ;;
+        macchanger) echo "macchanger" ;;
+        lynis) echo "lynis" ;;
+        rkhunter) echo "rkhunter" ;;
+        chkrootkit) echo "chkrootkit" ;;
+        preload) echo "preload" ;;
+        mimalloc) echo "libmimalloc2.0" ;;
+        ccache) echo "ccache" ;;
+        cpupower) echo "linux-tools-common" ;;
+        fail2ban) echo "fail2ban" ;;
+        scx-scheds) echo "SPECIAL_CHECK" ;;
+        clamav) echo "clamav clamav-daemon" ;;
+        tlp) echo "tlp tlp-rdw" ;;
+        earlyoom) echo "earlyoom" ;;
+        # installer.sh's apt branch never installs these - booster
+        # (initramfs) and limine are pacman/xbps-only in ULU
+        booster) echo "" ;;
+        limine) echo "" ;;
+        *) echo "$base_pkg" ;;
+      esac
+      ;;
+    pacman)
+      echo "$base_pkg"
+      ;;
+    xbps)
+      case "$base_pkg" in
+        unrar) echo "unrar" ;;
+        gamemode) echo "gamemode" ;;
+        # 32-bit gamemode libs are auto-built into the multilib repo as
+        # libgamemode-32bit (the gamemode template's `libgamemode_package`
+        # subpackage, "-32bit" suffixed). Double check with
+        # `xbps-query -Rs gamemode` on a live system if this ever drifts.
+        lib32-gamemode) echo "libgamemode-32bit" ;;
+        dnscrypt-proxy) echo "dnscrypt-proxy" ;;
+        dnsmasq) echo "dnsmasq" ;;
+        apparmor) echo "apparmor" ;;
+        # Available in void-packages (srcpkgs/gufw)
+        gufw) echo "gufw" ;;
+        macchanger) echo "macchanger" ;;
+        lynis) echo "lynis" ;;
+        rkhunter) echo "rkhunter" ;;
+        chkrootkit) echo "chkrootkit" ;;
+        # Available in void-packages (srcpkgs/preload), ships a runit service
+        preload) echo "preload" ;;
+        # Available in void-packages (srcpkgs/mimalloc)
+        mimalloc) echo "mimalloc" ;;
+        ccache) echo "ccache" ;;
+        cpupower) echo "cpupower" ;;
+        fail2ban) echo "fail2ban" ;;
+        scx-scheds) echo "scx" ;;
+        clamav) echo "clamav" ;;
+        tlp) echo "tlp" ;;
+        earlyoom) echo "earlyoom" ;;
+        *) echo "$base_pkg" ;;
+      esac
+      ;;
+  esac
+}
+
+### CHECK IF PACKAGE IS INSTALLED ###
+check_package() {
+  local pkg=$1
+  
+  case "$PKG_MANAGER" in
+    pacman)
+      if pacman -Qi "$pkg" &>/dev/null; then
+        return 0
+      else
+        return 1
+      fi
+      ;;
+    apt)
+      if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+        return 0
+      else
+        return 1
+      fi
+      ;;
+    xbps)
+      if xbps-query "$pkg" &>/dev/null; then
+        return 0
+      else
+        return 1
+      fi
+      ;;
+  esac
+}
+
+### CHECK SCX-SCHEDS (SPECIAL CASE FOR APT/SOURCE INSTALL) ###
+check_scx_scheds() {
+  # Check kernel version first
+  if ! check_kernel_version; then
+    echo -e "${YELLOW}⊘${RESET} scx-scheds - Skipped (kernel < 6.12, current: $(uname -r))"
+    ((SKIPPED++))
+    return
+  fi
+  
+  case "$PKG_MANAGER" in
+    apt)
+      # For apt, scx is built from source and installed to /usr/local/bin or ~/.cargo/bin
+      # Check for any scx_* binaries
+      local scx_found=0
+      local scx_binaries=""
+      
+      # Check common installation paths
+      for path in /usr/local/bin ~/.cargo/bin /usr/bin; do
+        if [ -d "$path" ]; then
+          for binary in "$path"/scx_*; do
+            if [ -x "$binary" ]; then
+              scx_found=1
+              scx_binaries="$scx_binaries $(basename $binary)"
+            fi
+          done
+        fi
+      done
+      
+      if [ "$scx_found" = "1" ]; then
+        echo -e "${GREEN}✓${RESET} scx-scheds (built from source, found:$scx_binaries)"
+        ((INSTALLED++))
+      else
+        echo -e "${RED}✗${RESET} scx-scheds - Not found (should be built from source for APT-based systems)"
+        ((MISSING++))
+      fi
+      ;;
+      
+    pacman|xbps)
+      # For package manager installs, check normally
+      local pkg_name=$(map_package_names "scx-scheds")
+      
+      if [ -z "$pkg_name" ]; then
+        echo -e "${YELLOW}⊘${RESET} scx-scheds - Not available for $PKG_MANAGER"
+        ((SKIPPED++))
+      elif check_package "$pkg_name"; then
+        echo -e "${GREEN}✓${RESET} scx-scheds ($pkg_name)"
+        ((INSTALLED++))
+      else
+        echo -e "${RED}✗${RESET} scx-scheds ($pkg_name) - Not installed"
+        ((MISSING++))
+      fi
+      ;;
+  esac
+}
+
+### CHECK ACTIVE SCX SCHEDULER ###
+# Reads the live kernel state directly instead of scraping dmesg. dmesg is a
+# ring buffer of finite size: a scheduler that was loaded a while ago (and
+# has since been pushed out by unrelated log spam, or across a `dmesg -C`)
+# would silently read as "not detected" even though it's actively running.
+# The sched_ext sysfs interface has no such blind spot - it always reflects
+# current state:
+#   /sys/kernel/sched_ext/state      -> "enabled" or "disabled"
+#   /sys/kernel/sched_ext/root/ops   -> name of the active scheduler
+#   /sys/kernel/sched_ext/enable_seq -> load count since boot (0 = never)
+check_active_scx_scheduler() {
+  echo -e "\n${BOLD}Checking Active SCX Scheduler${RESET}"
+
+  # First check if kernel supports sched_ext
+  if ! check_kernel_version; then
+    echo -e "${YELLOW}⊘${RESET} SCX scheduler - Kernel does not support sched_ext (requires 6.12+)"
+    return
+  fi
+
+  local scx_state=""
+  local scheduler_name=""
+
+  if [ -r /sys/kernel/sched_ext/state ]; then
+    # Primary path: the sched_ext sysfs interface (always current, no root
+    # or dmesg-buffer luck required - the script runs as root anyway).
+    scx_state=$(cat /sys/kernel/sched_ext/state 2>/dev/null)
+    if [ "$scx_state" = "enabled" ] && [ -r /sys/kernel/sched_ext/root/ops ]; then
+      scheduler_name=$(cat /sys/kernel/sched_ext/root/ops 2>/dev/null)
+    fi
+  elif [ -r /sys/kernel/debug/sched/ext ]; then
+    # Fallback: the older debugfs interface, for kernels/configs that
+    # haven't got the sysfs interface promoted.
+    local debug_output
+    debug_output=$(cat /sys/kernel/debug/sched/ext 2>/dev/null)
+    if echo "$debug_output" | grep -q "enable_state[[:space:]]*:[[:space:]]*enabled"; then
+      scx_state="enabled"
+      scheduler_name=$(echo "$debug_output" | awk -F'[[:space:]]*:[[:space:]]*' '/^ops/ {print $2}')
+    else
+      scx_state="disabled"
+    fi
+  fi
+
+  if [ "$scx_state" = "enabled" ]; then
+    if [ -n "$scheduler_name" ]; then
+      echo -e "${GREEN}✓${RESET} Active SCX scheduler: ${BLUE}$scheduler_name${RESET}"
+    else
+      echo -e "${GREEN}✓${RESET} SCX scheduler active (name unavailable)"
+    fi
+    return
+  fi
+
+  if [ "$scx_state" != "disabled" ]; then
+    # Neither sysfs nor debugfs interface was readable - fall back to a
+    # dmesg scan as a last resort, but flag it as unconfirmed since it
+    # can miss a scheduler that's been running long enough to scroll out
+    # of the ring buffer.
+    local dmesg_output
+    dmesg_output=$(dmesg 2>/dev/null | grep -i "sched_ext" | tail -5)
+    local dmesg_sched
+    dmesg_sched=$(echo "$dmesg_output" | grep -oP 'BPF scheduler "\K[^"]+' | tail -1)
+    if [ -n "$dmesg_sched" ]; then
+      echo -e "${YELLOW}⚠ ${RESET} Active SCX scheduler (from dmesg, unconfirmed): ${BLUE}$dmesg_sched${RESET}"
+      echo -e "${BLUE}ℹ${RESET} sched_ext sysfs/debugfs interfaces were unavailable to confirm this directly"
+      return
+    fi
+  fi
+
+  # No scheduler is currently active. Note whether one has run before, and
+  # whether tooling is at least present.
+  if [ -r /sys/kernel/sched_ext/enable_seq ]; then
+    local enable_seq
+    enable_seq=$(cat /sys/kernel/sched_ext/enable_seq 2>/dev/null)
+    if [ -n "$enable_seq" ] && [ "$enable_seq" -gt 0 ] 2>/dev/null; then
+      echo -e "${BLUE}ℹ${RESET} No scheduler active now, but one has loaded $enable_seq time(s) since boot"
+    fi
+  fi
+
+  local has_scx=0
+  for cmd in scx_bpfland scx_rusty scx_lavd scx_cake scx_rustland scx_simple; do
+    if command -v "$cmd" &>/dev/null; then
+      has_scx=1
+      break
+    fi
+  done
+
+  if [ "$has_scx" = "1" ]; then
+    echo -e "${YELLOW}⚠ ${RESET} No active SCX scheduler detected"
+    echo -e "${BLUE}ℹ${RESET} scx binaries are installed but no scheduler is currently running"
+    echo -e "${BLUE}ℹ${RESET} You can start a scheduler manually (e.g., 'sudo scx_rusty')"
+  else
+    echo -e "${YELLOW}⊘${RESET} No SCX scheduler running (scx-scheds not installed)"
+  fi
+}
+
+### CHECK LIMINE BOOTLOADER ###
+# Detection is based on the limine package only - firmware type (UEFI vs
+# BIOS) is NOT used to decide whether to look for it. If the package is
+# installed it gets a check.
+# If it's absent: on UEFI that's MISSING (installer.sh's install_limine sets
+# it up there), while on BIOS/legacy it's SKIPPED (GRUB-only by design).
+check_limine() {
+  local mapped
+  mapped=$(map_package_names "limine")
+
+  if [ -z "$mapped" ]; then
+    echo -e "${YELLOW}⊘${RESET} limine - Not available for $PKG_MANAGER"
+    ((SKIPPED++))
+  elif check_package "$mapped"; then
+    echo -e "${GREEN}✓${RESET} limine ($mapped) - installed"
+    ((INSTALLED++))
+  elif [ -d /sys/firmware/efi ]; then
+    echo -e "${RED}✗${RESET} limine - Not installed"
+    ((MISSING++))
+  else
+    echo -e "${YELLOW}⊘${RESET} limine - Not installed (optional on BIOS/legacy, GRUB-only by design)"
+    ((SKIPPED++))
+  fi
+}
+
+### VERIFY PACKAGES ###
+verify_packages() {
+  local category=$1
+  shift
+  local packages="$*"
+  
+  echo -e "\n${BOLD}Checking $category${RESET}"
+  
+  for base_pkg in $packages; do
+    # Special handling for scx-scheds
+    if [ "$base_pkg" = "scx-scheds" ]; then
+      check_scx_scheds
+      continue
+    fi
+    
+    mapped=$(map_package_names "$base_pkg")
+    
+    if [ -z "$mapped" ]; then
+      echo -e "${YELLOW}⊘${RESET} $base_pkg - Not available for $PKG_MANAGER"
+      ((SKIPPED++))
+      continue
+    fi
+    
+    all_installed=true
+    missing_pkgs=""
+    
+    for pkg in $mapped; do
+      if ! check_package "$pkg"; then
+        all_installed=false
+        missing_pkgs="$missing_pkgs $pkg"
+      fi
+    done
+    
+    if $all_installed; then
+      echo -e "${GREEN}✓${RESET} $base_pkg ($mapped)"
+      ((INSTALLED++))
+    elif [[ " $OPTIONAL_PACKAGES " == *" $base_pkg "* ]]; then
+      # Optional package that isn't there: shown for visibility but SKIPPED
+      # rather than MISSING, so it never lowers the pass-rate score.
+      echo -e "${YELLOW}⚠ ${RESET} $base_pkg - Missing:$missing_pkgs (optional, does not affect score)"
+      ((SKIPPED++))
+    else
+      echo -e "${RED}✗${RESET} $base_pkg - Missing:$missing_pkgs"
+      ((MISSING++))
+    fi
+  done
+}
+
+### VERIFY SERVICES (INIT AGNOSTIC) ###
+# Checks whether a service is enabled *and actually running* without
+# assuming systemd. Uses the appropriate query for whichever init system
+# was detected (systemd, runit, OpenRC, s6, dinit), and always cross-checks
+# against the live process table as a fallback/sanity-check that works no
+# matter what is managing services.
+#
+# Optional 4th argument: name of a function that asks the daemon itself
+# whether it is alive (returns 0 if so). A successful probe is authoritative
+# and overrides a "not running" verdict from the init/process checks, so a
+# unit-name or process-name mismatch can't produce a false negative.
+#
+# Optional 5th argument: 1 marks the service as optional. If it isn't detected
+# as running it is shown as a warning but SKIPPED rather than MISSING, so it
+# never lowers the pass-rate score (a service that IS running still counts as
+# OK, same as the optional packages).
+verify_service() {
+  local service_name=$1
+  local display_name=${2:-$service_name}
+  local process_name=${3:-$service_name}
+  local live_probe=${4:-}
+  local optional=${5:-0}
+
+  local enabled=1
+  local running=1
+  local detail=""
+
+  case "$INIT_SYSTEM" in
+    systemd)
+      local ie ia
+      ie=$(systemctl is-enabled "$service_name" 2>&1)
+      [ $? -eq 0 ] && enabled=0
+      ia=$(systemctl is-active "$service_name" 2>&1)
+      [ $? -eq 0 ] && running=0
+      detail="systemctl is-enabled: '$ie' | systemctl is-active: '$ia'"
+      ;;
+    runit)
+      if [ -e "/var/service/$service_name" ]; then
+        enabled=0
+        local sv_out
+        sv_out=$(sv status "$service_name" 2>&1)
+        echo "$sv_out" | grep -q "^run:" && running=0
+        detail="/var/service/$service_name exists | sv status: '$sv_out'"
+      else
+        detail="/var/service/$service_name does not exist"
+      fi
+      ;;
+    openrc)
+      local ru rs
+      ru=$(rc-update show 2>/dev/null | awk '{print $1}')
+      echo "$ru" | grep -qx "$service_name" && enabled=0
+      rs=$(rc-service "$service_name" status 2>&1)
+      echo "$rs" | grep -qi "started" && running=0
+      detail="in rc-update show: $([ $enabled -eq 0 ] && echo yes || echo no) | rc-service status: '$rs'"
+      ;;
+    s6)
+      local sd sr
+      sd=$(s6-rc-db list all 2>&1)
+      echo "$sd" | grep -qx "$service_name" && enabled=0
+      sr=$(s6-rc -a list 2>&1)
+      echo "$sr" | grep -qx "$service_name" && running=0
+      detail="known to s6-rc-db: $([ $enabled -eq 0 ] && echo yes || echo no) | in s6-rc -a list: $([ $running -eq 0 ] && echo yes || echo no)"
+      ;;
+    dinit)
+      local dl
+      dl=$(dinitctl list 2>&1)
+      echo "$dl" | grep -q "\[[a-zA-Z ]*\] *$service_name\b" && enabled=0
+      echo "$dl" | grep "$service_name" | grep -qi "started" && running=0
+      detail="dinitctl list entry: '$(echo "$dl" | grep "$service_name")'"
+      ;;
+    *)
+      detail="init system unrecognized ($INIT_SYSTEM) - relying on process check only"
+      ;;
+  esac
+
+  # Init-agnostic fallback: confirm via the live process table so a running
+  # service is never missed, even if the init system's own bookkeeping was
+  # inconclusive or unrecognized.
+  local running_before_fallback=$running
+  local matched_via=""
+  if [ "$running" -ne 0 ] && pgrep -x "$process_name" &>/dev/null; then
+    running=0
+    matched_via="pgrep -x $process_name"
+  fi
+  if [ "$running" -ne 0 ]; then
+    # -f matches the full command line, not just argv[0], which means it
+    # can (rarely) match an ancestor of this very script if the process
+    # name string happens to appear in how the script itself was invoked.
+    # Excluding our own PID and parent PID keeps that self-match out.
+    local f_pids
+    f_pids=$(pgrep -f "$process_name" 2>/dev/null | grep -vx -e "$$" -e "$PPID")
+    if [ -n "$f_pids" ]; then
+      running=0
+      matched_via="pgrep -f $process_name"
+    fi
+  fi
+
+  # Optional authoritative probe: ask the daemon itself rather than inferring
+  # from init bookkeeping or process names.
+  local probe_result="n/a"
+  if [ -n "$live_probe" ]; then
+    if "$live_probe"; then
+      probe_result="answered"
+      if [ "$running" -ne 0 ]; then
+        running=0
+        matched_via="live probe: $live_probe"
+      fi
+    else
+      probe_result="no answer"
+    fi
+  fi
+
+  if [ "$VERBOSE" = "1" ]; then
+    echo -e "  ${BLUE}[debug]${RESET} init=$INIT_SYSTEM service=$service_name process=$process_name"
+    echo -e "  ${BLUE}[debug]${RESET} $detail"
+    if [ -n "$live_probe" ]; then
+      echo -e "  ${BLUE}[debug]${RESET} live probe ($live_probe): $probe_result"
+    fi
+    if [ "$running_before_fallback" -ne 0 ] && [ "$running" -eq 0 ]; then
+      echo -e "  ${BLUE}[debug]${RESET} init system reported not-running; caught by fallback ($matched_via)"
+    fi
+    if [ "$running" -ne 0 ]; then
+      echo -e "  ${BLUE}[debug]${RESET} pgrep -x $process_name: no match | pgrep -f $process_name: no match"
+      echo -e "  ${BLUE}[debug]${RESET} closest actual processes: $(pgrep -fa "${process_name:0:6}" 2>/dev/null | head -3 | tr '\n' ';' || echo none)"
+    fi
+  fi
+
+  if [ "$running" -eq 0 ]; then
+    if [ "$enabled" -eq 0 ]; then
+      echo -e "${GREEN}✓${RESET} $display_name - enabled and running"
+    else
+      echo -e "${GREEN}✓${RESET} $display_name - running"
+    fi
+    ((INSTALLED++))
+    return 0
+  elif [ "$optional" = "1" ]; then
+    # Optional service that isn't detected: shown for visibility, but SKIPPED
+    # rather than MISSING so it never lowers the pass-rate score.
+    if [ "$enabled" -eq 0 ]; then
+      echo -e "${YELLOW}⚠ ${RESET} $display_name - enabled but not detected running (optional, does not affect score)"
+    else
+      echo -e "${YELLOW}⚠ ${RESET} $display_name - not detected running (optional, does not affect score)"
+    fi
+    ((SKIPPED++))
+    return 1
+  else
+    if [ "$enabled" -eq 0 ]; then
+      echo -e "${YELLOW}⚠ ${RESET} $display_name - enabled but not running"
+    else
+      echo -e "${RED}✗${RESET} $display_name - not enabled/running"
+    fi
+    ((MISSING++))
+    return 1
+  fi
+}
+
+### VERIFY APPARMOR (KERNEL STATE, MODELED ON LYNIS MACF-6208) ###
+# AppArmor is a kernel LSM, not a daemon: there is no process to find, and
+# the "apparmor" unit is just a oneshot that loads profiles at boot (it is
+# skipped entirely when the LSM isn't active). Asking the init system or the
+# process table is therefore the wrong question. Lynis instead reads
+# /sys/kernel/security/apparmor/profiles and uses aa-status's exit code:
+#   0 enabled and policy loaded      1 not enabled/loaded
+#   2 enabled but no policy loaded   3 control files not available
+#   4 not enough privileges to read the control files
+verify_apparmor() {
+  local profiles_file="/sys/kernel/security/apparmor/profiles"
+  local aa_out aa_rc nprof=0
+
+  aa_out=$(aa-status 2>&1)
+  aa_rc=$?
+  [ -r "$profiles_file" ] && nprof=$(wc -l < "$profiles_file" 2>/dev/null | tr -d ' ')
+  nprof=${nprof:-0}
+
+  if [ "$VERBOSE" = "1" ]; then
+    echo -e "  ${BLUE}[debug]${RESET} aa-status exit code: $aa_rc | profiles file: $([ -r "$profiles_file" ] && echo "readable, $nprof profiles" || echo "missing/unreadable")"
+    echo -e "  ${BLUE}[debug]${RESET} active LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown)"
+  fi
+
+  case "$aa_rc" in
+    0)
+      echo -e "${GREEN}✓${RESET} AppArmor - enabled, policy loaded ($nprof profiles)"
+      ((INSTALLED++))
+      ;;
+    2)
+      echo -e "${YELLOW}⚠ ${RESET} AppArmor - enabled but no policy loaded (is the apparmor service enabled?)"
+      ((MISSING++))
+      ;;
+    1|3)
+      echo -e "${RED}✗${RESET} AppArmor - not active in the running kernel (check 'cat /sys/kernel/security/lsm' and the lsm= kernel parameter)"
+      ((MISSING++))
+      ;;
+    4)
+      echo -e "${YELLOW}⚠ ${RESET} AppArmor - status unreadable (insufficient privileges)"
+      ((MISSING++))
+      ;;
+    *)
+      # Unexpected exit code (e.g. a differently-behaved aa-status build):
+      # fall back to the kernel's own profile list.
+      if [ "$nprof" -gt 0 ]; then
+        echo -e "${GREEN}✓${RESET} AppArmor - $nprof profiles loaded (aa-status exit code $aa_rc)"
+        ((INSTALLED++))
+      else
+        echo -e "${RED}✗${RESET} AppArmor - status unclear (aa-status exit code $aa_rc, no profiles loaded)"
+        ((MISSING++))
+      fi
+      ;;
+  esac
+}
+
+### VERIFY FAIL2BAN (LIVE PROBE + JAILS, MODELED ON LYNIS TOOL-5102/5104) ###
+# fail2ban_ping asks the server over its socket: `fail2ban-client ping`
+# prints "Server replied: pong" when it is up. This works on any init system
+# and doesn't depend on the unit name or process name.
+fail2ban_ping() {
+  command -v fail2ban-client &>/dev/null || return 1
+  timeout 5 fail2ban-client ping 2>&1 | grep -qi "pong"
+}
+
+# Lynis lists enabled jails from the parsed configuration (`fail2ban-client -d`
+# dumps it without needing the server). Informational only: it is not counted
+# in the score, since an unconfigured Fail2ban is a config choice rather than
+# a broken install.
+check_fail2ban_jails() {
+  local jails
+  jails=$(timeout 15 fail2ban-client -d 2>/dev/null | tr -d "[]'" | awk -F, '$1=="add" {print $2}' | tr -d ' ' | tr '\n' ' ')
+  if [ -n "$jails" ]; then
+    echo -e "${BLUE}ℹ${RESET} Fail2ban jails configured: $jails"
+  else
+    echo -e "${YELLOW}⚠ ${RESET} Fail2ban - no jails enabled in configuration (jail.local / jail.d), so nothing is being monitored"
+  fi
+}
+
+### VERIFY FILES ###
+verify_file() {
+  local file_path=$1
+  local display_name=${2:-$file_path}
+  
+  if [ -f "$file_path" ]; then
+    echo -e "${GREEN}✓${RESET} $display_name"
+    ((INSTALLED++))
+    return 0
+  else
+    echo -e "${RED}✗${RESET} $display_name - missing"
+    ((MISSING++))
+    return 1
+  fi
+}
+
+### VERIFY EXECUTABLE ###
+verify_executable() {
+  local file_path=$1
+  local display_name=${2:-$file_path}
+  
+  if [ -f "$file_path" ] && [ -x "$file_path" ]; then
+    echo -e "${GREEN}✓${RESET} $display_name - exists and executable"
+    ((INSTALLED++))
+    return 0
+  elif [ -f "$file_path" ]; then
+    echo -e "${YELLOW}⚠ ${RESET} $display_name - exists but not executable"
+    ((MISSING++))
+    return 1
+  else
+    echo -e "${RED}✗${RESET} $display_name - missing"
+    ((MISSING++))
+    return 1
+  fi
+}
+
+### MAIN VERIFICATION ###
+detect_package_manager
+detect_init_system
+
+# Display kernel version
+echo -e "\n${BOLD}System Information${RESET}"
+kernel_ver=$(uname -r)
+echo -e "Kernel version: ${BLUE}$kernel_ver${RESET}"
+echo -e "Init system: ${BLUE}$INIT_SYSTEM${RESET}"
+
+if check_kernel_version; then
+  echo -e "scx-scheds compatibility: ${GREEN}✓ Compatible (6.12+)${RESET}"
+else
+  echo -e "scx-scheds compatibility: ${YELLOW}⚠ Not compatible (requires 6.12+)${RESET}"
+fi
+
+# Base packages
+base_packages="unrar gamemode lib32-gamemode dnscrypt-proxy dnsmasq apparmor gufw macchanger lynis rkhunter chkrootkit preload mimalloc ccache cpupower fail2ban scx-scheds clamav earlyoom booster"
+
+# Optional packages: if they're not installed they are SKIPPED (not MISSING),
+# so they don't contribute to the score. If they ARE installed, they're
+# counted as normal.
+OPTIONAL_PACKAGES="cpupower fail2ban"
+
+verify_packages "Base Packages" $base_packages
+
+# Laptop packages check. TLP is optional: if it's missing, that's shown
+# for visibility but is SKIPPED rather than counted as MISSING, so it never
+# lowers the pass-rate score.
+echo -e "\n${BOLD}Checking Laptop-Specific Packages${RESET}"
+tlp_mapped=$(map_package_names "tlp")
+if [ -z "$tlp_mapped" ]; then
+  echo -e "${YELLOW}⊘${RESET} tlp - Not available for $PKG_MANAGER"
+  ((SKIPPED++))
+else
+  tlp_all_installed=true
+  tlp_missing_pkgs=""
+
+  for pkg in $tlp_mapped; do
+    if ! check_package "$pkg"; then
+      tlp_all_installed=false
+      tlp_missing_pkgs="$tlp_missing_pkgs $pkg"
+    fi
+  done
+
+  if $tlp_all_installed; then
+    echo -e "${GREEN}✓${RESET} tlp ($tlp_mapped)"
+    ((INSTALLED++))
+  else
+    echo -e "${YELLOW}⚠ ${RESET} tlp - Missing:$tlp_missing_pkgs (optional, does not affect score)"
+    ((SKIPPED++))
+  fi
+fi
+
+# Check active SCX scheduler
+check_active_scx_scheduler
+
+# Check Limine bootloader
+echo -e "\n${BOLD}Checking Bootloader${RESET}"
+check_limine
+
+# Configuration files
+echo -e "\n${BOLD}Checking Configuration Files${RESET}"
+
+verify_executable "/bin/hardening-script" "Hardening Script"
+
+if [ -f "/etc/rc.local" ]; then
+  verify_executable "/etc/rc.local" "rc.local"
+elif [ -f "/etc/rc.d/rc.local" ]; then
+  verify_executable "/etc/rc.d/rc.local" "rc.d/rc.local"
+fi
+
+# DNS Configuration (apt systems)
+if [ "$PKG_MANAGER" = "apt" ]; then
+  echo -e "\n${BOLD}Checking DNS Configuration (apt-specific)${RESET}"
+  
+  verify_file "/etc/dnscrypt-proxy/dnscrypt-proxy.toml" "DNSCrypt Proxy Config"
+  verify_file "/etc/dnsmasq.conf" "Dnsmasq Config"
+
+  if [ -f "/etc/NetworkManager/conf.d/00-dns-none.conf" ]; then
+    echo -e "${GREEN}✓${RESET} NetworkManager DNS Override"
+    ((INSTALLED++))
+  elif grep -q "^dns=none" /etc/NetworkManager/NetworkManager.conf 2>/dev/null; then
+    echo -e "${GREEN}✓${RESET} NetworkManager DNS Override - set in NetworkManager.conf [main]"
+    ((INSTALLED++))
+  elif systemctl is-active systemd-resolved &>/dev/null && grep -q "^DNS=127.0.0.1" /etc/systemd/resolved.conf 2>/dev/null; then
+    echo -e "${GREEN}✓${RESET} NetworkManager DNS Override - deferred to systemd-resolved (DNS=127.0.0.1)"
+    ((INSTALLED++))
+  else
+    echo -e "${RED}✗${RESET} NetworkManager DNS Override - missing"
+    ((MISSING++))
+  fi
+
+  if [ -f "/etc/resolv.conf" ]; then
+    if grep -q "nameserver 127.0.0.1" /etc/resolv.conf 2>/dev/null; then
+      echo -e "${GREEN}✓${RESET} resolv.conf - configured for local DNS"
+      ((INSTALLED++))
+    else
+      echo -e "${YELLOW}⚠ ${RESET} resolv.conf - exists but may not be configured correctly"
+      ((MISSING++))
+    fi
+
+    # lsattr reads flags on the symlink node itself and errors on symlinks,
+    # so resolve to the real target first (systemd-resolved makes this a symlink).
+    resolv_target=$(readlink -f /etc/resolv.conf)
+    if [ "$resolv_target" != "/etc/resolv.conf" ]; then
+      if lsattr "$resolv_target" 2>/dev/null | grep -q "i"; then
+        echo -e "${GREEN}✓${RESET} resolv.conf - immutable flag set on $resolv_target"
+        ((INSTALLED++))
+      else
+        echo -e "${YELLOW}⚠ ${RESET} resolv.conf - symlink to $resolv_target, not immutable (harden /etc/systemd/resolved.conf instead)"
+      fi
+    elif lsattr /etc/resolv.conf 2>/dev/null | grep -q "i"; then
+      echo -e "${GREEN}✓${RESET} resolv.conf - immutable flag set"
+      ((INSTALLED++))
+    else
+      echo -e "${YELLOW}⚠ ${RESET} resolv.conf - immutable flag not set"
+      ((MISSING++))
+    fi
+  else
+    echo -e "${RED}✗${RESET} resolv.conf - missing"
+    ((MISSING++))
+  fi
+fi
+
+# Services
+echo -e "\n${BOLD}Checking Services${RESET}"
+
+if [ "$PKG_MANAGER" = "apt" ]; then
+  verify_service "dnscrypt-proxy" "DNSCrypt Proxy"
+  verify_service "dnsmasq" "Dnsmasq"
+
+  if [ "$INIT_SYSTEM" = "systemd" ]; then
+    if systemctl is-enabled systemd-resolved &>/dev/null; then
+      echo -e "${YELLOW}⚠ ${RESET} systemd-resolved - should be disabled/masked"
+      ((MISSING++))
+    else
+      echo -e "${GREEN}✓${RESET} systemd-resolved - properly disabled"
+      ((INSTALLED++))
+    fi
+  fi
+fi
+
+if command -v fail2ban-client &>/dev/null; then
+  verify_service "fail2ban" "Fail2ban" "fail2ban-server" fail2ban_ping 1
+  check_fail2ban_jails
+fi
+
+if command -v tlp &>/dev/null; then
+  verify_service "tlp" "TLP (Laptop Power Management)"
+fi
+
+if command -v earlyoom &>/dev/null; then
+  verify_service "earlyoom" "EarlyOOM"
+fi
+
+# AppArmor check (kernel state, not init/process state - see verify_apparmor)
+if command -v aa-status &>/dev/null; then
+  verify_apparmor
+fi
+
+# Custom daemon checks
+echo -e "\n${BOLD}Checking Custom Daemons${RESET}"
+
+# Check ephemeral-overlay daemon
+overlay_running=0
+overlay_pid=""
+
+# Method 1: Check PID file
+if [ -f "/var/run/ramoverlay-daemon.pid" ]; then
+  overlay_pid=$(cat /var/run/ramoverlay-daemon.pid 2>/dev/null | tr -d '\n' || echo "")
+  if [ -n "$overlay_pid" ] && kill -0 "$overlay_pid" 2>/dev/null; then
+    overlay_running=1
+  fi
+fi
+
+# Method 2: Check by process name if PID file method failed
+if [ "${overlay_running}" = "0" ]; then
+  overlay_pid=$(pgrep -f "ephemeral-overlay" 2>/dev/null | head -n1 | tr -d '\n' || echo "")
+  if [ -n "$overlay_pid" ]; then
+    overlay_running=1
+  fi
+fi
+
+# Method 3: Check for active overlay mounts (definitive proof it's working)
+overlay_count=$(mount 2>/dev/null | grep -c "type overlay" | tr -d '\n' || echo "0")
+[ -z "$overlay_count" ] && overlay_count=0
+
+ram_overlay_active=0
+if [ -f "/var/run/ramoverlay.state" ] && grep -q "active" /var/run/ramoverlay.state 2>/dev/null; then
+  ram_overlay_active=1
+fi
+
+if [ "$overlay_running" = "1" ]; then
+  echo -e "${GREEN}✓${RESET} ephemeral-overlay daemon - running (PID: $overlay_pid)"
+  ((INSTALLED++))
+  
+  if [ "$ram_overlay_active" = "1" ]; then
+    echo -e "${GREEN}✓${RESET} RAM overlay - active"
+    if [ "$overlay_count" -gt 0 ] 2>/dev/null; then
+      echo -e "${GREEN}✓${RESET} Active overlay mounts: $overlay_count"
+    fi
+  else
+    echo -e "${YELLOW}⚠ ${RESET} RAM overlay - daemon running but overlay inactive (waiting for login)"
+  fi
+elif [ "$overlay_count" -gt 0 ] 2>/dev/null || [ "$ram_overlay_active" = "1" ]; then
+  echo -e "${GREEN}✓${RESET} ephemeral-overlay - working (detected $overlay_count overlay mounts)"
+  ((INSTALLED++))
+  echo -e "${YELLOW}⚠ ${RESET} Note: Process detection may be unreliable, but overlays are active"
+else
+  # Optional: not running is shown for visibility but SKIPPED rather than
+  # MISSING, so it never lowers the pass-rate score.
+  echo -e "${YELLOW}⚠ ${RESET} ephemeral-overlay daemon - not running (optional, does not affect score)"
+  ((SKIPPED++))
+fi
+
+# Summary
+echo -e "\n${BOLD}Verification Summary${RESET}"
+echo -e "${GREEN}Installed/OK:${RESET} $INSTALLED"
+echo -e "${RED}Missing/Failed:${RESET} $MISSING"
+echo -e "${YELLOW}Skipped (N/A):${RESET} $SKIPPED"
+
+TOTAL_CHECKED=$((INSTALLED + MISSING))
+if [ $TOTAL_CHECKED -gt 0 ]; then
+  PASS_PCT=$(( INSTALLED * 100 / TOTAL_CHECKED ))
+else
+  PASS_PCT=0
+fi
+echo -e "${BOLD}Pass rate:${RESET} ${PASS_PCT}% (${INSTALLED}/${TOTAL_CHECKED})"
+
+if [ $MISSING -eq 0 ]; then
+  exit 0
+else
+  echo -e "\n${YELLOW}${BOLD}⚠  Some packages or configurations are missing. Review the output above.${RESET}"
+  exit 1
+fi

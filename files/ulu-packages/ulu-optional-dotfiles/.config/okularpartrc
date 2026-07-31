@@ -1,0 +1,6 @@
+[Main View]
+ShowBottomBar=true
+
+[PageView]
+MouseMode=TextSelect
+ViewMode=Facing

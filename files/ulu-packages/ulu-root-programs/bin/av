@@ -1,0 +1,590 @@
+#!/bin/bash
+
+set -uo pipefail
+
+# ---------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------
+STATE_DIR="/var/lib/antivirus"
+LOG_DIR="/var/log/antivirus"
+QUARANTINE_DIR="$STATE_DIR/quarantine"
+CACHE_FILE="$STATE_DIR/scanned.cache"
+DB_DIR="/var/lib/clamav"
+CLAMD_STARTUP_TIMEOUT=60
+
+MODE="quick"
+DO_UPDATE=1
+DO_DELETE=0
+AGGRESSIVE=0
+FORCE=0
+DO_YES=0
+RING_BELL=0
+THREADS=""
+EXPLICIT_PATHS=()
+
+QUICK_TARGETS=(/home /tmp /bin /var/tmp /var/mail /usr/local /opt /etc)
+MAXSIZE_FLAGS=(--max-filesize=100M --max-scansize=100M --pcre-max-filesize=100M)
+
+DEFS_CHANGED=0
+HAVE_CLAMD=0
+HAVE_FRESHCLAM=0
+TOTAL_FOUND=0
+SKIPPED_CACHED=0
+CANDIDATE_COUNT=0
+DETECTED_COUNT=0
+QUARANTINED_COUNT=0
+DELETED_COUNT=0
+ENGINE_USED=""
+THREADS_USED=""
+IONICE=()
+RENICE=()
+
+declare -A CACHE_SEEN
+declare -A INFECTED_SET
+
+print_help() {
+    cat <<'EOF'
+antivirus - fast, parallel, quarantine-safe ClamAV wrapper
+
+Usage:
+  ./antivirus [options] [path ...]
+
+If not already running as root, this re-runs itself through 'su' and
+prompts for the root password - no need to type sudo yourself.
+
+If you pass one or more paths, only those are scanned (overrides
+--quick/--full).
+
+Options:
+  --quick               Scan common hotspots (default): home dirs, tmp,
+                        mail spool, /etc, /opt, /usr/local, /bin
+  --full                Scan the whole root filesystem (/)
+  --threads N           Use N parallel workers (default: auto, based on
+                        CPU count and whether the disk is SSD or HDD)
+  --aggressive          Realtime IO priority + top CPU priority. Faster,
+                        but can make the rest of the system sluggish.
+  --delete              Permanently delete infected files (default is
+                        to quarantine them, so a false positive can't
+                        destroy data you can't get back)
+  --quarantine-dir DIR  Where to put quarantined files
+                        (default: /var/lib/antivirus/quarantine)
+  --no-update           Skip the freshclam signature update
+  --force               Ignore the unchanged-file cache; rescan everything
+  -y, --yes             Don't ask for confirmation; remove infections
+                        automatically (needed for cron/unattended runs)
+  --bell                Ring the terminal bell if infections are found
+  -h, --help            Show this help
+
+By default, if anything infected is found, it's listed on screen and you
+get a Y/n prompt before anything is touched. With no terminal to answer
+(e.g. cron) and no --yes, infected files are left in place untouched and
+logged, rather than either hanging forever or guessing.
+EOF
+}
+
+log() {
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "$msg"
+    [[ -n "${LOGFILE:-}" ]] && echo "$msg" >> "$LOGFILE"
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        if ! command -v su >/dev/null 2>&1; then
+            echo "This needs root privileges and 'su' isn't available. Re-run this script as root." >&2
+            exit 1
+        fi
+        exec su -c "$(printf '%q ' "$0" "$@")"
+    fi
+}
+
+check_deps() {
+    local missing=() c
+    for c in clamscan find sort stat sha256sum mktemp split; do
+        command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        echo "ERROR: missing required tools: ${missing[*]}" >&2
+        echo "  Debian/Ubuntu: sudo apt-get install clamav coreutils findutils" >&2
+        echo "  RHEL/Fedora:   sudo dnf install clamav coreutils findutils" >&2
+        echo "  Arch:          sudo pacman -S clamav coreutils findutils" >&2
+        exit 4
+    fi
+    HAVE_CLAMD=0
+    if command -v clamdscan >/dev/null 2>&1 && command -v clamd >/dev/null 2>&1; then
+        HAVE_CLAMD=1
+    fi
+    HAVE_FRESHCLAM=0
+    command -v freshclam >/dev/null 2>&1 && HAVE_FRESHCLAM=1
+}
+
+is_rotational() {
+    local path="${1:-/}" src base
+    src=$(df --output=source "$path" 2>/dev/null | tail -n1)
+    if [[ -z "$src" || "$src" == "none" ]]; then
+        echo 1   # unknown -> assume HDD, be conservative
+        return
+    fi
+    base=$(lsblk -no pkname "$src" 2>/dev/null | head -n1)
+    [[ -z "$base" ]] && base=$(basename "$src")
+    if [[ -f "/sys/block/$base/queue/rotational" ]]; then
+        cat "/sys/block/$base/queue/rotational"
+    else
+        echo 1
+    fi
+}
+
+calc_threads() {
+    local cores rota
+    cores=$(nproc 2>/dev/null || echo 1)
+    if [[ -n "$THREADS" ]]; then
+        echo "$THREADS"
+        return
+    fi
+    if (( AGGRESSIVE )); then
+        echo "$cores"
+        return
+    fi
+    rota=$(is_rotational "/")
+    if [[ "$rota" == "1" ]] && (( cores > 2 )); then
+        echo 2   # extra readers just cause seek-thrashing on HDD
+    else
+        echo "$cores"
+    fi
+}
+
+db_fingerprint() {
+    find "$DB_DIR" -maxdepth 1 -type f \( -name '*.cvd' -o -name '*.cld' \) 2>/dev/null \
+        | sort | xargs -r stat -c '%n %Y %s' 2>/dev/null | sha256sum | awk '{print $1}'
+}
+
+has_database() {
+    find "$DB_DIR" -maxdepth 1 -type f \( -name '*.cvd' -o -name '*.cld' \) 2>/dev/null | grep -q .
+}
+
+ensure_database() {
+    local before after
+    before="$(db_fingerprint)"
+
+    if (( DO_UPDATE )); then
+        if (( HAVE_FRESHCLAM )); then
+            log "Updating virus definitions..."
+            if freshclam --quiet >>"$LOGFILE" 2>&1; then
+                log "Definition check complete."
+            else
+                log "WARNING: freshclam could not update (offline, rate-limited, or no permission). Using the existing database."
+            fi
+        else
+            log "freshclam not installed; skipping definition update."
+        fi
+    fi
+
+    if ! has_database; then
+        echo "ERROR: no ClamAV signature database found in $DB_DIR." >&2
+        echo "Run 'sudo freshclam' once with internet access, then try again." >&2
+        exit 3
+    fi
+
+    after="$(db_fingerprint)"
+    if [[ "$before" != "$after" ]]; then
+        DEFS_CHANGED=1
+        log "Signature database changed since last run; ignoring the unchanged-file cache for this run."
+    fi
+}
+
+clamd_ready() {
+    clamdscan --ping 1 >/dev/null 2>&1
+}
+
+start_clamd_via_init_system() {
+    local svc
+    for svc in clamav-daemon clamd@scan clamd; do
+        if command -v systemctl >/dev/null 2>&1 && systemctl start "$svc" >/dev/null 2>&1; then
+            return 0
+        fi
+        if command -v service >/dev/null 2>&1 && service "$svc" start >/dev/null 2>&1; then
+            return 0
+        fi
+        if command -v rc-service >/dev/null 2>&1 && rc-service "$svc" start >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -x "/etc/init.d/$svc" ]] && "/etc/init.d/$svc" start >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+start_clamd_directly() {
+    local conf="" c
+    for c in /etc/clamav/clamd.conf /etc/clamd.d/scan.conf /etc/clamd.conf; do
+        [[ -f "$c" ]] && { conf="$c"; break; }
+    done
+    [[ -z "$conf" ]] && return 1
+    command -v clamd >/dev/null 2>&1 || return 1
+
+    log "No init system actually started clamd; launching it directly."
+    mkdir -p "$LOG_DIR"
+    nohup "${IONICE[@]}" "${RENICE[@]}" clamd --config-file="$conf" >>"$LOG_DIR/clamd.log" 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+}
+
+ensure_clamd() {
+    command -v clamdscan >/dev/null 2>&1 || return 1
+    clamd_ready && return 0
+
+    # NOTE: init scripts can exit 0 without actually starting clamd (e.g.
+    # a distro's init.d script silently refusing because it thinks the
+    # signature database is missing). Never trust that exit code alone -
+    # give it a short window to come up for real, and if it doesn't,
+    # fall through to launching clamd ourselves regardless of what the
+    # init system claimed.
+    start_clamd_via_init_system
+    local waited=0
+    while (( waited < 10 )); do
+        clamd_ready && return 0
+        sleep 1
+        ((waited++))
+    done
+
+    start_clamd_directly
+
+    waited=0
+    while (( waited < CLAMD_STARTUP_TIMEOUT )); do
+        clamd_ready && return 0
+        sleep 1
+        ((waited++))
+    done
+    return 1
+}
+
+build_targets() {
+    if (( ${#EXPLICIT_PATHS[@]} > 0 )); then
+        TARGETS=("${EXPLICIT_PATHS[@]}")
+    elif [[ "$MODE" == "full" ]]; then
+        TARGETS=(/)
+    else
+        TARGETS=()
+        local t
+        for t in "${QUICK_TARGETS[@]}"; do
+            [[ -e "$t" ]] && TARGETS+=("$t")
+        done
+    fi
+}
+
+load_cache() {
+    [[ -f "$CACHE_FILE" ]] || return 0
+    local p m s
+    while IFS=$'\t' read -r p m s; do
+        [[ -z "$p" ]] && continue
+        CACHE_SEEN["$p"]="$m $s"
+    done < "$CACHE_FILE"
+}
+
+build_candidates() {
+    local workdir="$1"
+    local all="$workdir/all.txt"
+    local kept="$workdir/candidates.txt"
+
+    : > "$all"
+    local t
+    for t in "${TARGETS[@]}"; do
+        [[ -e "$t" ]] || continue
+        # -xdev: stay on each target's own filesystem (skip /proc, /sys,
+        # network mounts, USB drives, etc. unless explicitly passed as a
+        # target themselves).
+        find "$t" -xdev -type f -not -path "${QUARANTINE_DIR}/*" 2>>"$LOGFILE" >> "$all"
+    done
+
+    TOTAL_FOUND=$(wc -l < "$all" | tr -d ' ')
+    SKIPPED_CACHED=0
+
+    if (( FORCE )) || (( DEFS_CHANGED )) || [[ ! -s "$CACHE_FILE" ]]; then
+        cp "$all" "$kept"
+    else
+        : > "$kept"
+        local f cur
+        while IFS= read -r f; do
+            cur=$(stat -c '%Y %s' "$f" 2>/dev/null) || { echo "$f" >> "$kept"; continue; }
+            if [[ "${CACHE_SEEN[$f]:-}" == "$cur" ]]; then
+                ((SKIPPED_CACHED++))
+            else
+                echo "$f" >> "$kept"
+            fi
+        done < "$all"
+    fi
+
+    CANDIDATE_COUNT=$(wc -l < "$kept" | tr -d ' ')
+    log "Found $TOTAL_FOUND file(s); $SKIPPED_CACHED unchanged since last clean scan; $CANDIDATE_COUNT to scan now."
+}
+
+save_cache() {
+    local workdir="$1"
+    local all="$workdir/all.txt" kept="$workdir/candidates.txt"
+    local tmp="$STATE_DIR/scanned.cache.tmp.$$"
+
+    : > "$tmp"
+
+    if [[ -f "$all" && -f "$kept" ]]; then
+        comm -23 <(sort -u "$all") <(sort -u "$kept") 2>/dev/null | while IFS= read -r f; do
+            v="${CACHE_SEEN[$f]:-}"
+            [[ -n "$v" ]] && printf '%s\t%s\n' "$f" "${v/ /$'\t'}"
+        done >> "$tmp"
+    fi
+
+    if [[ -f "$kept" ]]; then
+        local f st
+        while IFS= read -r f; do
+            [[ -n "${INFECTED_SET[$f]:-}" ]] && continue
+            [[ -e "$f" ]] || continue
+            st=$(stat -c '%Y %s' "$f" 2>/dev/null) || continue
+            printf '%s\t%s\n' "$f" "${st/ /$'\t'}"
+        done < "$kept" >> "$tmp"
+    fi
+
+    sort -o "$tmp" "$tmp" 2>/dev/null
+    mkdir -p "$STATE_DIR"
+    mv "$tmp" "$CACHE_FILE"
+}
+
+run_clamd_scan() {
+    local candidates="$1"
+    : > "$INFECTED_RAW"
+    [[ "$(wc -l < "$candidates" | tr -d ' ')" == "0" ]] && return 0
+    clamdscan --fdpass --multiscan -i --no-summary --file-list="$candidates" \
+        >> "$INFECTED_RAW" 2>>"$LOGFILE"
+    return 0
+}
+
+run_clamscan_parallel() {
+    local threads="$1" candidates="$2"
+    local total lines_per_chunk
+
+    total=$(wc -l < "$candidates" | tr -d ' ')
+    if (( total == 0 )); then
+        : > "$INFECTED_RAW"
+        return 0
+    fi
+
+    lines_per_chunk=$(( (total + threads - 1) / threads ))
+    (( lines_per_chunk < 1 )) && lines_per_chunk=1
+
+    split -l "$lines_per_chunk" "$candidates" "$WORKDIR/chunk."
+
+    local pids=() chunk
+    for chunk in "$WORKDIR"/chunk.*; do
+        [[ -e "$chunk" ]] || continue
+        "${IONICE[@]}" "${RENICE[@]}" clamscan \
+            -i --no-summary "${MAXSIZE_FLAGS[@]}" \
+            --file-list="$chunk" \
+            > "$chunk.out" 2>>"$LOGFILE" &
+        pids+=($!)
+    done
+
+    local pid
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null
+    done
+
+    cat "$WORKDIR"/chunk.*.out > "$INFECTED_RAW" 2>/dev/null
+}
+
+parse_infected() {
+    local raw="$1" out="$2"
+    : > "$out"
+    [[ -s "$raw" ]] || return 0
+    local line rest path sig
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        rest="${line% FOUND}"
+        path="${rest%: *}"
+        sig="${rest##*: }"
+        [[ -e "$path" ]] || continue
+        INFECTED_SET["$path"]=1
+        printf '%s\t%s\n' "$path" "$sig" >> "$out"
+    done < "$raw"
+}
+
+report_and_confirm() {
+    local parsed="$1" count path sig reply
+    count=$(wc -l < "$parsed" | tr -d ' ')
+    (( count == 0 )) && return 1
+
+    {
+        echo
+        echo "$count infected file(s) detected:"
+        while IFS=$'\t' read -r path sig; do
+            printf '  - %s  [%s]\n' "$path" "$sig"
+        done < "$parsed"
+        echo
+    } | tee -a "$LOGFILE"
+
+    if (( DO_YES )); then
+        log "Auto-confirmed removal (--yes)."
+        return 0
+    fi
+
+    if read -r -t 30 -p "Remove ${count} infected file(s) now? [Y/n] " reply; then
+        case "$reply" in
+            ""|[Yy]*) return 0 ;;
+            *) log "Declined; leaving $count infected file(s) in place."; return 1 ;;
+        esac
+    else
+        echo
+        log "No confirmation received; leaving $count infected file(s) in place. Re-run with --yes to remove automatically (e.g. from cron)."
+        return 1
+    fi
+}
+
+remediate() {
+    local parsed="$1"
+    QUARANTINED_COUNT=0
+    DELETED_COUNT=0
+    [[ -s "$parsed" ]] || return 0
+
+    (( DO_DELETE )) || mkdir -p "$QUARANTINE_DIR"
+
+    local path sig hash ts destname
+    while IFS=$'\t' read -r path sig; do
+        [[ -e "$path" ]] || continue
+
+        hash=$(sha256sum -- "$path" 2>/dev/null | awk '{print $1}')
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+
+        if (( DO_DELETE )); then
+            rm -f -- "$path"
+            printf '%s\tDELETED\t%s\t%s\t%s\t-\n' "$ts" "$path" "$sig" "$hash" >> "$MANIFEST"
+            ((DELETED_COUNT++))
+            log "DELETED (infected: $sig): $path"
+        else
+            destname="$QUARANTINE_DIR/$(date +%Y%m%d%H%M%S)__${hash:0:12}__$(basename -- "$path")"
+            if mv -- "$path" "$destname" 2>>"$LOGFILE"; then
+                chmod 000 -- "$destname" 2>/dev/null
+                printf '%s\tQUARANTINED\t%s\t%s\t%s\t%s\n' "$ts" "$path" "$sig" "$hash" "$destname" >> "$MANIFEST"
+                ((QUARANTINED_COUNT++))
+                log "QUARANTINED (infected: $sig): $path -> $destname"
+            else
+                log "WARNING: could not quarantine $path"
+            fi
+        fi
+    done < "$parsed"
+}
+
+print_summary() {
+    local elapsed mins secs rate
+    elapsed=$(( $(date +%s) - START_TS ))
+    mins=$(( elapsed / 60 ))
+    secs=$(( elapsed % 60 ))
+    rate="n/a"
+    if (( elapsed > 0 && CANDIDATE_COUNT > 0 )); then
+        rate="$(( CANDIDATE_COUNT / elapsed )) files/sec"
+    fi
+
+    {
+        echo
+        echo "===================== Scan summary ====================="
+        echo "Engine:              $ENGINE_USED ($THREADS_USED worker(s))"
+        echo "Targets:             ${TARGETS[*]}"
+        echo "Files found:         $TOTAL_FOUND"
+        echo "Skipped (unchanged): $SKIPPED_CACHED"
+        echo "Actually scanned:    $CANDIDATE_COUNT"
+        echo "Detected infected:   $DETECTED_COUNT"
+        echo "Quarantined:         $QUARANTINED_COUNT  -> $QUARANTINE_DIR"
+        echo "Deleted:             $DELETED_COUNT"
+        if (( DETECTED_COUNT > QUARANTINED_COUNT + DELETED_COUNT )); then
+            echo "Left in place:       $(( DETECTED_COUNT - QUARANTINED_COUNT - DELETED_COUNT ))  (removal not confirmed)"
+        fi
+        echo "Time:                ${mins}m ${secs}s  ($rate)"
+        echo "Log:                 $LOGFILE"
+        if (( QUARANTINED_COUNT + DELETED_COUNT > 0 )); then
+            echo "Manifest:            $MANIFEST"
+        fi
+        echo "=========================================================="
+    } | tee -a "$LOGFILE"
+
+    if (( RING_BELL )) && (( DETECTED_COUNT > 0 )); then
+        printf '\a'
+    fi
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quick) MODE="quick"; shift ;;
+            --full) MODE="full"; shift ;;
+            --threads) THREADS="${2:?--threads needs a number}"; shift 2 ;;
+            --aggressive) AGGRESSIVE=1; shift ;;
+            --delete) DO_DELETE=1; shift ;;
+            --quarantine-dir) QUARANTINE_DIR="${2:?--quarantine-dir needs a path}"; shift 2 ;;
+            --no-update) DO_UPDATE=0; shift ;;
+            --force) FORCE=1; shift ;;
+            -y|--yes) DO_YES=1; shift ;;
+            --bell) RING_BELL=1; shift ;;
+            -h|--help) print_help; exit 0 ;;
+            --) shift; EXPLICIT_PATHS+=("$@"); break ;;
+            -*) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
+            *) EXPLICIT_PATHS+=("$1"); shift ;;
+        esac
+    done
+}
+
+main() {
+    require_root "$@"
+    parse_args "$@"
+
+    mkdir -p "$STATE_DIR" "$LOG_DIR"
+    LOGFILE="$LOG_DIR/scan-$(date +%Y%m%d-%H%M%S).log"
+    MANIFEST="$STATE_DIR/quarantine-manifest.tsv"
+    START_TS=$(date +%s)
+
+    log "antivirus starting (mode=$MODE, delete=$DO_DELETE, aggressive=$AGGRESSIVE)"
+
+    check_deps
+    load_cache
+    ensure_database
+    build_targets
+
+    if (( AGGRESSIVE )); then
+        IONICE=(ionice -c1 -n0); RENICE=(nice -n -20)
+    else
+        IONICE=(ionice -c2 -n0); RENICE=(nice -n -5)
+    fi
+    command -v ionice >/dev/null 2>&1 || IONICE=()
+    command -v nice   >/dev/null 2>&1 || RENICE=()
+
+    local threads_calc
+    threads_calc=$(calc_threads)
+
+    WORKDIR=$(mktemp -d)
+    trap 'rm -rf "$WORKDIR"' EXIT
+
+    build_candidates "$WORKDIR"
+
+    INFECTED_RAW="$WORKDIR/infected.raw"
+    : > "$INFECTED_RAW"
+
+    if (( HAVE_CLAMD )) && ensure_clamd; then
+        ENGINE_USED="clamd daemon (multiscan+fdpass)"
+        THREADS_USED="daemon-managed"
+        log "Using the clamd daemon for scanning."
+        run_clamd_scan "$WORKDIR/candidates.txt"
+    else
+        ENGINE_USED="clamscan (parallel fallback)"
+        THREADS_USED="$threads_calc"
+        log "clamd unavailable; falling back to $threads_calc parallel clamscan worker(s)."
+        run_clamscan_parallel "$threads_calc" "$WORKDIR/candidates.txt"
+    fi
+
+    local infected_parsed="$WORKDIR/infected_parsed.tsv"
+    parse_infected "$INFECTED_RAW" "$infected_parsed"
+    DETECTED_COUNT=$(wc -l < "$infected_parsed" | tr -d ' ')
+    if report_and_confirm "$infected_parsed"; then
+        remediate "$infected_parsed"
+    fi
+    save_cache "$WORKDIR"
+    print_summary
+}
+
+main "$@"

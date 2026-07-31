@@ -1,0 +1,357 @@
+#!/bin/bash
+
+# Capture the actual $USER before privilege escalation
+ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-${DOAS_USER:-$(logname 2>/dev/null || echo "$USER")}}}"
+
+# Cleanup function
+cleanup() {
+    rm -rf /home/ulu-files
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+
+# Elevate privileges
+if [ "$(id -u)" -ne 0 ]; then
+    exec su -c "ACTUAL_USER='$ACTUAL_USER' bash '$0'"
+fi
+
+### INIT SYSTEM DETECTION ###
+detect_init_system() {
+    case "$(ps -p 1 -o comm=)" in
+        s6-svscan)
+            echo "s6"
+            ;;
+        runit|runit-init)
+            echo "runit"
+            ;;
+        dinit)
+            echo "dinit"
+            ;;
+        init|openrc-init)
+            echo "openrc"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
+INIT_SYSTEM=$(detect_init_system)
+
+# SERVICE REMOVAL HELPER
+remove_service() {
+    service_name="$1"
+    case "$INIT_SYSTEM" in
+        openrc)
+            rc-update del "$service_name" default 2>/dev/null || true
+            ;;
+        runit)
+            unlink "/run/runit/service/$service_name" 2>/dev/null || true
+            unlink "/etc/runit/runsvdir/default/$service_name" 2>/dev/null || true
+            ;;
+        dinit)
+            unlink "/etc/dinit.d/boot.d/$service_name" 2>/dev/null || true
+            ;;
+        s6)
+            if command -v s6 >/dev/null 2>&1; then
+                s6 set disable "$service_name" >/dev/null 2>&1 || true
+            fi
+            rm -f "/etc/s6/adminsv/default/contents.d/$service_name"
+            ;;
+    esac
+}
+
+### STRIP UFW/APPARMOR/FAIL2BAN FOR WHICHEVER INIT SYSTEM IS ACTIVE ###
+remove_security_features() {
+    case "$INIT_SYSTEM" in
+        s6)
+            pacman -R --noconfirm gufw ufw apparmor fail2ban ufw-s6 apparmor-s6 fail2ban-s6 || true
+            ;;
+        openrc)
+            pacman -R --noconfirm gufw ufw apparmor fail2ban ufw-openrc apparmor-openrc fail2ban-openrc || true
+            ;;
+        runit)
+            pacman -R --noconfirm gufw ufw apparmor fail2ban ufw-runit apparmor-runit fail2ban-runit || true
+            ;;
+        dinit)
+            pacman -R --noconfirm gufw ufw apparmor fail2ban ufw-dinit apparmor-dinit fail2ban-dinit || true
+            ;;
+        *)
+            pacman -R --noconfirm gufw ufw apparmor fail2ban || true
+            ;;
+    esac
+    remove_service ufw
+    remove_service apparmor
+    remove_service fail2ban
+    case "$INIT_SYSTEM" in
+        openrc) rc-update -u || true ;;
+        s6) command -v s6-db-reload >/dev/null 2>&1 && s6-db-reload ;;
+    esac
+
+    reset-permissions
+    # The profile just installed /etc/default/grub; GRUB and Limine both read their cmdline from it
+    update-boot
+}
+
+# SCRIPT VOCABULARY
+
+ACTUAL_GROUP="$(id -gn "$ACTUAL_USER" 2>/dev/null || echo "$ACTUAL_USER")"
+
+ULU_DIR="/home/ulu-files"
+ULU_PKG_DIR="$ULU_DIR/files/ulu-packages"
+
+# Python tools sent to /home/$ACTUAL_USER/Tools ("Repo:file")
+ULU_USER_TOOLS=(
+    "Archivist-Tools:archivist-tools.py"
+    "Audio-Frequency-Tools:audio-frequency-tools.py"
+    "Media-Tools:media-tools.py"
+    "Document-Tools:document-tools.py"
+    "Compare-Objects:compare-objects.py"
+)
+
+# Tools sent to /bin ("Repo:file")
+ULU_BIN_TOOLS=(
+    "Game-Focus:game-focus"
+)
+
+### CLONE A GITHUB REPO WITH RETRIES ###
+
+clone_repo() {
+    local repo="$1" dir="$2" attempt
+
+    for attempt in $(seq 1 5); do
+        echo "Cloning $repo (attempt $attempt/5)..." >&2
+        rm -rf "$dir"
+        if GIT_TERMINAL_PROMPT=0 git clone --depth 1 "https://github.com/Michael-Sebero/$repo" "$dir"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 5 ]; then
+            echo "Attempt $attempt failed for $repo, retrying in 5 seconds..." >&2
+            sleep 5
+        fi
+    done
+
+    return 1
+}
+
+### FETCH THE ULU REPOSITORY (ONCE, ON FIRST USE) ###
+
+fetch_ulu_repo() {
+    [ -d "$ULU_PKG_DIR" ] && return 0
+
+    if ! command -v git >/dev/null 2>&1; then
+        pacman -S --noconfirm --needed git || {
+            echo "Error: git is required but could not be installed." >&2
+            return 1
+        }
+    fi
+
+    if ! clone_repo ULU "$ULU_DIR"; then
+        echo "Error: could not clone the ULU repository." >&2
+        return 1
+    fi
+}
+
+### ULU PACKAGE INSTALLATION ###
+
+# Create a directory (and any missing parents) owned by the given user
+make_owned_dirs() {
+    local dir="$1" owner="$2" group="$3"
+
+    [ -d "$dir" ] && return 0
+    make_owned_dirs "$(dirname "$dir")" "$owner" "$group"
+    install -d -m 755 -o "$owner" -g "$group" "$dir"
+}
+
+# $1 package, $2 subpath inside it, $3 destination root ("" = /), $4/$5 owner/group ("" = root)
+_install_ulu_files() {
+    local pkg_dir="$ULU_PKG_DIR/$1"
+    local target="$pkg_dir${2:+/$2}"
+    local dest="$3" owner="$4" group="$5"
+    local src rel mode out
+    local own_args=()
+    local status=0
+
+    fetch_ulu_repo || return 1
+
+    if [ ! -e "$target" ]; then
+        echo "Error: $target does not exist, skipping." >&2
+        return 1
+    fi
+
+    [ -n "$owner" ] && own_args=(-o "$owner" -g "$group")
+
+    echo -e "\e[1mInstalling $1...\e[0m"
+    while IFS= read -r -d "" src; do
+        rel="${src#"$pkg_dir"/}"
+        mode=$(stat -c "%a" "$src")
+        case "$rel" in
+            bin/*) mode=755 ;;
+        esac
+        out="$dest/$rel"
+        if [ -n "$owner" ]; then
+            make_owned_dirs "$(dirname "$out")" "$owner" "$group"
+        fi
+        if ! install -D -m "$mode" "${own_args[@]}" "$src" "$out"; then
+            echo "Error: failed to install $out" >&2
+            status=1
+        fi
+    done < <(find "$target" -type f -print0)
+
+    return "$status"
+}
+
+# Same as the installer: files land under /
+install_ulu_package() {
+    _install_ulu_files "$1" "$2" "" "" ""
+}
+
+# Files land under /home/$ACTUAL_USER and are owned by that user
+install_ulu_home_package() {
+    if [ ! -d "/home/$ACTUAL_USER" ]; then
+        echo "Error: /home/$ACTUAL_USER does not exist, skipping $1." >&2
+        return 1
+    fi
+    _install_ulu_files "$1" "" "/home/$ACTUAL_USER" "$ACTUAL_USER" "$ACTUAL_GROUP"
+}
+
+### ULU EXTERNAL TOOLS ###
+
+# Usage: install_external_tools DEST_DIR OWNER GROUP ENTRY...
+# ENTRY is "Repo:file". Leave OWNER and GROUP empty to install as root.
+install_external_tools() {
+    local dest_dir="$1" owner="$2" group="$3"
+    shift 3
+    local entry repo file tmp
+    local failed_tools=()
+    local own_args=()
+
+    [ -n "$owner" ] && own_args=(-o "$owner" -g "$group")
+
+    tmp=$(mktemp -d) || return 1
+
+    for entry in "$@"; do
+        repo="${entry%%:*}"
+        file="${entry#*:}"
+
+        # The mode is set explicitly: these files are committed without the executable bit.
+        if clone_repo "$repo" "$tmp/$repo" && install -D -m 755 "${own_args[@]}" "$tmp/$repo/$file" "$dest_dir/$file"; then
+            echo "Installed $dest_dir/$file"
+        else
+            echo "Failed to install $file from $repo, skipping..." >&2
+            failed_tools+=("$file")
+        fi
+    done
+
+    rm -rf "$tmp"
+
+    if [ "${#failed_tools[@]}" -gt 0 ]; then
+        echo -e "\e[1mThe following tools failed to install and were skipped:\e[0m" >&2
+        for file in "${failed_tools[@]}"; do
+            echo "  - $file" >&2
+        done
+        return 1
+    fi
+}
+
+
+# OPTIONAL PROGRAMS
+read -p "Do you want to install optional programs? [y/N] " optional1
+if [ "$optional1" = "y" ] || [ "$optional1" = "Y" ]; then
+    install_ulu_package ulu-optional-programs
+
+    # /home/$ACTUAL_USER/Tools receives the Python tools, /bin receives game-focus
+    if install -d -m 755 -o "$ACTUAL_USER" -g "$ACTUAL_GROUP" "/home/$ACTUAL_USER/Tools"; then
+        install_external_tools "/home/$ACTUAL_USER/Tools" "$ACTUAL_USER" "$ACTUAL_GROUP" "${ULU_USER_TOOLS[@]}"
+    else
+        echo "Error: could not create /home/$ACTUAL_USER/Tools, skipping the Python tools." >&2
+    fi
+    install_external_tools /bin "" "" "${ULU_BIN_TOOLS[@]}"
+
+    reset-permissions
+    pacman -S --noconfirm python-dateutil python-xlib python-pyaudio python-pipenv python-matplotlib python-tqdm python-magic python-piexif python-moviepy python-brotli python-websockets python-librosa python-pypdf2 python-pytesseract || true
+fi
+
+# OPTIONAL PACKAGES
+read -p "Do you want to install optional packages? (Artix/Arch only) [y/N] " optional2
+if [ "$optional2" = "y" ] || [ "$optional2" = "Y" ]; then
+    runuser -u "$ACTUAL_USER" -- env HOME="/home/$ACTUAL_USER" XDG_CACHE_HOME="/home/$ACTUAL_USER/.cache" XDG_CONFIG_HOME="/home/$ACTUAL_USER/.config" XDG_DATA_HOME="/home/$ACTUAL_USER/.local/share" paru -S gparted gsmartcontrol gpu-screen-recorder-gtk-git github-desktop nicotine+ miniupnpc psensor testdisk tenacity pipewire-jack qbittorrent nix thunderbird docker python-pipx songrec mangohud lib32-mangohud librewolf tmux font-manager bleachbit catfish element-desktop libreoffice noto-fonts-emoji tauon-music-box freetube alsa-utils gimp haruna kate konsole kcalc xfce4-panel-profiles okular ark akregator
+fi
+
+# OPTIONAL EMULATORS
+read -p "Do you want to install game console emulators? (Artix/Arch only) [y/N] " console_emu
+if [ "$console_emu" = "y" ] || [ "$console_emu" = "Y" ]; then
+    runuser -u "$ACTUAL_USER" -- env HOME="/home/$ACTUAL_USER" XDG_CACHE_HOME="/home/$ACTUAL_USER/.cache" XDG_CONFIG_HOME="/home/$ACTUAL_USER/.config" XDG_DATA_HOME="/home/$ACTUAL_USER/.local/share" paru -S dolphin-emu duckstation pcsx2 rpcs3 desmume snes9x fceux stella xemu-git mupen64plus retroarch
+fi
+
+# HIGH AUDIO QUALITY
+read -p "Do you want to install a high quality audio configuration? (32-bit/768kHz compatible devices only) [y/N] " audio_preset
+if [ "$audio_preset" = "y" ] || [ "$audio_preset" = "Y" ]; then
+    install_ulu_home_package ulu-optional-audio
+    reset-permissions
+fi
+
+# OPTIONAL DOTFILES
+read -p "Do you want to install optional dotfiles? [y/N] " dotfiles_ans
+if [ "$dotfiles_ans" = "y" ] || [ "$dotfiles_ans" = "Y" ]; then
+    install_ulu_home_package ulu-optional-dotfiles
+    reset-permissions
+fi
+
+# REMOVE SECURITY FEATURES
+read -p "Do you want to remove all security features to maximize performance? [y/N] " remove_security1_ans
+if [ "$remove_security1_ans" = "y" ] || [ "$remove_security1_ans" = "Y" ]; then
+    if install_ulu_package ulu-optional-performance; then
+        remove_security_features
+    else
+        echo "Error: ulu-optional-performance did not install cleanly, skipping security feature removal." >&2
+    fi
+fi
+
+# REMOVE SECURITY FEATURES [AMD]
+read -p "Do you want to remove all security features to maximize performance? (AMD) [y/N] " remove_security2_ans
+if [ "$remove_security2_ans" = "y" ] || [ "$remove_security2_ans" = "Y" ]; then
+    # The AMD profile shares the performance sysctl.conf and adds its own grub and environment
+    if install_ulu_package ulu-optional-performance etc/sysctl.conf && install_ulu_package ulu-optional-amd; then
+        remove_security_features
+    else
+        echo "Error: ulu-optional-amd did not install cleanly, skipping security feature removal." >&2
+    fi
+fi
+
+# LLM CONFIGURATION
+read -p "Do you want to tailor this system to enhance LLM programs? [y/N] " llm_configuration_ans
+if [ "$llm_configuration_ans" = "y" ] || [ "$llm_configuration_ans" = "Y" ]; then
+    if install_ulu_package ulu-optional-llm; then
+        remove_security_features
+    else
+        echo "Error: ulu-optional-llm did not install cleanly, skipping security feature removal." >&2
+    fi
+fi
+
+# SERVER CONFIGURATION
+read -p "Do you want to tailor this system for hosting? [y/N] " server_configuration_ans
+if [ "$server_configuration_ans" = "y" ] || [ "$server_configuration_ans" = "Y" ]; then
+    install_ulu_package ulu-optional-server
+    pacman -S --noconfirm zfs-dkms-git
+    reset-permissions
+fi
+
+# ADD SWAP
+read -p "Do you want 20 gigs of swap memory? [y/N] " swap
+if [ "$swap" = "y" ] || [ "$swap" = "Y" ]; then
+    fallocate -l 20G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+    grep -qxF '/swapfile none swap sw 0 0' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# AMD OVERCLOCK
+read -p "Do you want to overclock/undervolt an AMD card? (Artix/Arch only) [y/N] " AMD
+if [ "$AMD" = "y" ] || [ "$AMD" = "Y" ]; then
+    pacman -S lact
+fi
+
+# FINAL REBOOT PROMPT
+read -p "Do you want to reboot now? [y/N] " reboot_now
+if [ "$reboot_now" = "y" ] || [ "$reboot_now" = "Y" ]; then
+    reboot
+fi

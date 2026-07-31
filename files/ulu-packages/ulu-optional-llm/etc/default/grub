@@ -1,0 +1,24 @@
+# GRUB boot loader configuration
+
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=3
+GRUB_TIMEOUT_STYLE=menu
+GRUB_DISTRIBUTOR=""
+
+GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 nokaslr noresume rootflags=noatime,lazytime"
+
+GRUB_CMDLINE_LINUX="nvidia-drm.modeset=1 nvidia.NVreg_PreserveVideoMemoryAllocations=1 amd_pstate=active cpufreq.default_governor=performance processor.max_cstate=1 mitigations=off pti=off l1tf=off mds=off tsx=on tsx_async_abort=off split_lock_detect=off transparent_hugepage=madvise preempt=full pcie_aspm=off pci=noaer audit=off tsc=reliable clocksource=tsc skew_tick=1 hpet=disable mce=ignore_ce random.trust_cpu=on random.trust_bootloader=on libahci.ignore_sss=1 lsm=none rcu_expedited console=tty2"
+
+GRUB_PRELOAD_MODULES="part_gpt part_msdos"
+GRUB_ENABLE_CRYPTODISK=y
+GRUB_DISABLE_RECOVERY=true
+GRUB_DISABLE_OS_PROBER=false
+GRUB_TERMINAL_INPUT=console
+GRUB_GFXMODE=auto
+GRUB_GFXPAYLOAD_LINUX=keep
+
+# Machine-specific parameters for encrypted, LVM, RAID or btrfs-subvolume roots,
+# written by boot-params. Sourced last so ULU upgrades and profiles keep them.
+if [ -r /etc/default/grub.local ]; then
+    . /etc/default/grub.local
+fi

@@ -1,0 +1,141 @@
+#!/bin/bash
+
+# Prompt the user to enter the desired time in hours, minutes, and seconds
+read -p "Enter the number of hours: " hours
+read -p "Enter the number of minutes: " minutes
+read -p "Enter the number of seconds: " seconds
+
+# Calculate the total number of seconds to wait
+total_seconds=$((hours * 3600 + minutes * 60 + seconds))
+
+echo "The alarm will go off in $hours hours, $minutes minutes, and $seconds seconds..."
+
+# --- Nuclear siren: synthesized on the fly, no .mp3 needed -----------------
+# Needs python3 (standard library only) plus any one audio player below.
+# Sound: an air-raid / civil-defense style wail. A rich, horn-like rotor tone
+# slowly winds up from ~300 Hz to ~620 Hz and coasts back down (14 s per wail),
+# with gritty overdrive and echoes bouncing off distant buildings. It loops
+# seamlessly and repeats until you press Ctrl+C or close the terminal.
+# The sound is generated BEFORE the countdown, so it starts the instant time is up.
+
+ALARM_FILE="$(mktemp "${TMPDIR:-/tmp}/alarm-XXXXXX.wav")"
+PLAYER_PID=""
+
+cleanup() {
+    if [ -n "$PLAYER_PID" ]; then
+        kill "$PLAYER_PID" 2>/dev/null
+    fi
+    rm -f "$ALARM_FILE"
+}
+trap cleanup EXIT
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to generate the alarm sound." >&2
+    exit 1
+fi
+
+python3 - "$ALARM_FILE" <<'PY'
+import math
+import random
+import struct
+import sys
+import wave
+
+RATE = 44100
+CYCLE_LEN = 14.0                # seconds for one full rise-and-fall wail
+REPEATS = 5                     # 5 x 14 s = 70 s per file; the shell loops it forever
+F_LOW = 300.0                   # Hz at the bottom of the wail
+F_HIGH = 620.0                  # Hz at the top of the wail
+DRIVE = 1.6                     # light saturation for a gritty, overdriven horn
+# Harmonic weights: a rotor siren is rich in overtones, which gives the hollow, brassy bite
+HARMONICS = [1.0, 0.70, 0.55, 0.35, 0.30, 0.20, 0.15, 0.10, 0.08, 0.05]
+# Echo taps (delay in seconds, gain): the sound bouncing off distant buildings
+ECHOES = [(0.09, 0.45), (0.21, 0.32), (0.37, 0.22), (0.61, 0.15), (0.93, 0.10)]
+
+two_pi = 2 * math.pi
+N = int(RATE * CYCLE_LEN)
+random.seed(1945)
+
+# Pass 1: pitch curve. A slow cosine sweep = the rotor winding up, then coasting down.
+sweep = [0.5 - 0.5 * math.cos(two_pi * (i / RATE) / CYCLE_LEN) for i in range(N)]
+phase = []
+p = 0.0
+for s in sweep:
+    p += two_pi * (F_LOW + (F_HIGH - F_LOW) * s) / RATE
+    phase.append(p)
+
+# Nudge the pitch by a hair so the cycle ends exactly on a whole number of waves.
+# That makes the loop seamless (no click) for the fundamental and every harmonic.
+scale = round(phase[-1] / two_pi) * two_pi / phase[-1]
+phase = [x * scale for x in phase]
+
+# Pass 2: synthesize. Louder as the rotor speeds up, plus a little rotor roar.
+dry = []
+for s, ph in zip(sweep, phase):
+    tone = sum(w * math.sin((k + 1) * ph) for k, w in enumerate(HARMONICS))
+    roar = random.uniform(-1.0, 1.0) * 0.12
+    dry.append((tone + roar) * (0.75 + 0.25 * s))
+
+# Pass 3: echo. Delays wrap around the cycle, so the loop stays seamless.
+wet = dry[:]
+for delay, gain in ECHOES:
+    d = int(RATE * delay)
+    shifted = dry[-d:] + dry[:-d]
+    wet = [a + gain * b for a, b in zip(wet, shifted)]
+
+# Pass 4: soft-clip for grit, then normalise.
+peak = max(abs(x) for x in wet)
+norm = math.tanh(DRIVE)
+cycle = [int(max(-1.0, min(1.0, math.tanh(DRIVE * x / peak) / norm * 0.9)) * 32767) for x in wet]
+data = struct.pack("<%dh" % N, *cycle)
+
+with wave.open(sys.argv[1], "wb") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(RATE)
+    w.writeframes(data * REPEATS)
+PY
+
+if [ $? -ne 0 ]; then
+    echo "Failed to generate the alarm sound." >&2
+    exit 1
+fi
+
+sleep "$total_seconds"
+
+trap 'echo; echo "Alarm stopped."; exit 0' INT TERM HUP
+
+# Pick whichever audio player is available on this system
+if command -v afplay >/dev/null 2>&1; then
+    PLAY_CMD=(afplay)
+elif command -v paplay >/dev/null 2>&1; then
+    PLAY_CMD=(paplay)
+elif command -v aplay >/dev/null 2>&1; then
+    PLAY_CMD=(aplay -q)
+elif command -v ffplay >/dev/null 2>&1; then
+    PLAY_CMD=(ffplay -nodisp -loglevel quiet -loop 0)
+elif command -v play >/dev/null 2>&1; then
+    PLAY_CMD=(play -q)
+elif command -v cvlc >/dev/null 2>&1; then
+    PLAY_CMD=(cvlc --play-and-exit --quiet)
+else
+    echo "No supported audio player found (tried afplay, paplay, aplay, ffplay, play, cvlc)." >&2
+    echo "Install one, e.g.: sudo apt install alsa-utils" >&2
+    exit 1
+fi
+
+echo "The alarm will sound until you press Ctrl+C or close this terminal."
+
+# Play forever. The player runs in the background and we wait on it so that
+# Ctrl+C is handled instantly and the sound stops with the script.
+while true; do
+    "${PLAY_CMD[@]}" "$ALARM_FILE" >/dev/null 2>&1 &
+    PLAYER_PID=$!
+    wait "$PLAYER_PID"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "Audio player (${PLAY_CMD[0]}) failed with exit code $status." >&2
+        PLAYER_PID=""
+        exit 1
+    fi
+done

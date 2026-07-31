@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# errors -- show only error/warning (and worse) messages from system logs,
+# without depending on systemd/journalctl. Reads plain-text syslog files
+# plus the kernel ring buffer (dmesg).
+
+set -uo pipefail
+
+# Candidate log files (varies by distro); only readable ones are used.
+LOG_CANDIDATES=(
+    /var/log/syslog
+    /var/log/messages
+    /var/log/kern.log
+    /var/log/daemon.log
+    /var/log/auth.log
+    /var/log/secure
+    /var/log/user.log
+)
+
+# Case-insensitive whole-word match. Covers standard syslog severities
+# (err/error, warn/warning, crit/critical, alert, emerg/emergency) plus
+# fail/failed/failure/failing, since most real-world failures are
+# logged with that word rather than the literal word "error".
+PATTERN='\b(error|err|warn(ing)?|fail(ed|ure|ing)?|critical|crit|emerg(ency)?|alert)\b'
+
+LINES=200
+FOLLOW=0
+
+usage() {
+    cat <<'EOF'
+errors -- show only error/warning (and worse) messages from system logs.
+Works without systemd/journalctl: reads plain-text syslog files + dmesg.
+
+Usage:
+  errors            Show recent matching lines (one-shot)
+  errors -f         Follow logs live; print new matches as they arrive
+  errors -n LINES   Lines to scan per log file (default: 200)
+  errors -h         Show this help
+
+Notes:
+  * Run with sudo for full access to /var/log/auth.log etc. if your
+    user isn't in the 'adm' group.
+  * Edit LOG_CANDIDATES / PATTERN at the top of this script to tune
+    which files and keywords are matched.
+EOF
+}
+
+while getopts ":fn:h" opt; do
+    case "$opt" in
+        f) FOLLOW=1 ;;
+        n) LINES="$OPTARG" ;;
+        h) usage; exit 0 ;;
+        \?) echo "errors: unknown option -$OPTARG" >&2; usage; exit 1 ;;
+        :)  echo "errors: -$OPTARG requires an argument" >&2; exit 1 ;;
+    esac
+done
+
+case "$LINES" in
+    ''|*[!0-9]*) echo "errors: -n requires a positive integer" >&2; exit 1 ;;
+esac
+
+FILES=()
+for f in "${LOG_CANDIDATES[@]}"; do
+    [ -r "$f" ] && FILES+=("$f")
+done
+
+COLOR=never
+[ -t 1 ] && COLOR=always
+
+HAVE_DMESG=0
+command -v dmesg >/dev/null 2>&1 && HAVE_DMESG=1
+
+if [ "$FOLLOW" -eq 1 ]; then
+    echo "errors: following logs -- Ctrl+C to stop" >&2
+
+    if [ "$HAVE_DMESG" -eq 1 ]; then
+        dmesg --follow --level=emerg,alert,crit,err,warn 2>/dev/null &
+        DMESG_PID=$!
+        trap 'kill "$DMESG_PID" 2>/dev/null' EXIT
+    fi
+
+    if [ "${#FILES[@]}" -gt 0 ]; then
+        tail -F -n0 "${FILES[@]}" 2>/dev/null | grep --line-buffered -iE --color="$COLOR" "$PATTERN"
+    elif [ "$HAVE_DMESG" -eq 1 ]; then
+        wait "$DMESG_PID"
+    else
+        echo "errors: no readable log files and no dmesg available" >&2
+        exit 1
+    fi
+else
+    if [ "$HAVE_DMESG" -eq 1 ]; then
+        echo "== kernel (dmesg) =="
+        # dmesg's own --level already filters by real kernel severity, so
+        # it is shown as-is (not re-filtered through PATTERN below, which
+        # is a text match and would wrongly drop e.g. a "warn"-level kernel
+        # message whose text doesn't literally contain the word "warn").
+        DMESG_OUT="$(dmesg --level=emerg,alert,crit,err,warn --color="$COLOR" 2>/dev/null)"
+        if [ -n "$DMESG_OUT" ]; then
+            printf '%s\n' "$DMESG_OUT"
+        else
+            echo "(none)"
+        fi
+        echo
+    fi
+
+    if [ "${#FILES[@]}" -gt 0 ]; then
+        echo "== log files: ${FILES[*]} =="
+        tail -n "$LINES" -q "${FILES[@]}" 2>/dev/null \
+            | grep -iE --color="$COLOR" "$PATTERN" || echo "(none)"
+    else
+        echo "errors: no readable log files found (tried: ${LOG_CANDIDATES[*]})" >&2
+    fi
+fi

@@ -1,0 +1,4 @@
+# Options passed to earlyoom (see earlyoom -h).
+# The --avoid regex is left unquoted on purpose: init scripts expand
+# $EARLYOOM_ARGS unquoted, so quotes would become part of the regex.
+EARLYOOM_ARGS="-m 15 -s 5 -r 60 --avoid ^(init|systemd|Xorg|Xwayland|sshd|firefox|wayfire|sway|kwin_wayland|kwin_x11|plasmashell|mutter|weston)$"

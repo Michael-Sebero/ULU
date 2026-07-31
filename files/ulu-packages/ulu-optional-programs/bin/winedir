@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# Prompt the user to enter a directory path
+read -p "Enter the directory path: " directory_path
+
+# Check if directory path is provided
+if [ -z "$directory_path" ]; then
+    echo "Error: Directory path not provided."
+    exit 1
+fi
+
+# Replace '/' with '\'
+wine_path=$(echo "$directory_path" | sed 's/\//\\/g')
+
+# Prepend 'z:' to the wine path
+wine_path="z:${wine_path}"
+
+echo "Wine directory path: $wine_path"

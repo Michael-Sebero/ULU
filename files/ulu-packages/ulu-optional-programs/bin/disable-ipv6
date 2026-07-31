@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Check if running as root
+if [ "$(id -u)" -eq 0 ]; then
+    # Determine the GRUB configuration file
+    if [ -f "/etc/default/grub" ]; then
+        grub_config="/etc/default/grub"
+    else
+        echo "GRUB configuration file not found. Please update the script."
+        exit 1
+    fi
+
+    # Backup the original GRUB configuration file
+    cp "$grub_config" "$grub_config.bak"
+
+    # Disable IPv6 in the GRUB configuration file
+    echo "Updating GRUB configuration to disable IPv6..."
+    sed -i '/GRUB_CMDLINE_LINUX=/ s/"$/ ipv6.disable=1"/' "$grub_config"
+
+    # Regenerate GRUB and Limine entries
+    echo "Updating boot entries..."
+    update-boot
+
+    echo "IPv6 has been disabled permanently."
+
+    # Reboot for changes to take effect
+    read -p "Do you want to reboot the system now? (y/n): " reboot_option
+    if [ "$reboot_option" == "y" ]; then
+        reboot
+    else
+        echo "Please reboot the system for changes to take effect."
+    fi
+else
+    # Request root privileges using 'su -c'
+    su -c "$0"
+fi

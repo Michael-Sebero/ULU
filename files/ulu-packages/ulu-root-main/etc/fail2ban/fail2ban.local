@@ -1,0 +1,8 @@
+# Overrides for the distro's fail2ban.conf
+
+[DEFAULT]
+# NOTICE still logs bans, which the recidive jail reads back from this log
+loglevel = NOTICE
+logtarget = /var/log/fail2ban.log
+dbpurgeage = 12h
+dbmaxmatches = 3

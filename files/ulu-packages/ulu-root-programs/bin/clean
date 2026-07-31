@@ -1,0 +1,73 @@
+#!/bin/bash
+
+set -e
+
+echo "removing orphaned packages..."
+ORPHANS=$(pacman -Qdtq || true)
+if [ -n "$ORPHANS" ]; then
+    doas pacman -Rns $ORPHANS
+else
+    echo "no orphans found"
+fi
+
+echo "clearing package cache..."
+if command -v paccache &>/dev/null; then
+    doas paccache -rk2
+    doas paccache -ruk0
+else
+    echo "warning: paccache not found, falling back to pacman -Sc"
+    echo "hint: install pacman-contrib for smarter cache pruning"
+    doas pacman -Sc --noconfirm
+fi
+
+echo "clearing user cache..."
+find ~/.cache -mindepth 1 -maxdepth 2 -atime +7 -exec rm -rf {} + 2>/dev/null || true
+
+echo "clearing aur helper cache..."
+for dir in ~/.cache/yay ~/.cache/paru; do
+    if [ -d "$dir" ]; then
+        rm -rf "$dir" 2>/dev/null && echo "cleared $dir" || echo "warning: could not clear $dir, skipping"
+    fi
+done
+
+echo "clearing old temp files..."
+doas find /tmp -mindepth 1 -atime +3 -exec rm -rf {} + 2>/dev/null || true
+
+echo "scanning for .pacsave and .pacnew files..."
+doas find /etc -name "*.pacsave" -o -name "*.pacnew" 2>/dev/null | while read -r f; do
+    echo "warning: review $f"
+done
+
+echo "removing broken symlinks not owned by a package..."
+doas find /usr/lib /usr/bin /usr/share -xtype l 2>/dev/null | while IFS= read -r link; do
+    pacman -Qqo "$link" >/dev/null 2>&1 || doas rm -f -- "$link"
+done
+
+echo "rebuilding font cache..."
+doas fc-cache -f 2>/dev/null || echo "warning: some font dirs could not be cached"
+fc-cache -f 2>/dev/null || echo "warning: user font cache partially failed, check ~/.local/share/fonts permissions"
+
+echo "rebuilding library cache..."
+doas ldconfig
+
+echo "trimming filesystems..."
+declare -A trimmed=()
+while read -r mp dev; do
+    dev=${dev%%\[*}
+    key=$(readlink -f "$dev" 2>/dev/null)
+    key=${key:-$dev}
+    [ -n "${trimmed[$key]:-}" ] && continue
+    trimmed[$key]=1
+    # Asked of the filesystem's own device so dm-crypt and LVM are judged correctly
+    rotational=$(lsblk -dno ROTA "$dev" 2>/dev/null | tr -d ' ')
+    gran=$(lsblk -bdno DISC-GRAN "$dev" 2>/dev/null | tr -d ' ')
+    if [ "$rotational" != "0" ]; then
+        echo "skipping $mp (rotational)"
+    elif [ "${gran:-0}" = "0" ]; then
+        echo "skipping $mp (no discard support; LUKS needs allow-discards)"
+    else
+        doas fstrim "$mp" -v
+    fi
+done < <(findmnt -nlo TARGET,SOURCE -t ext4,btrfs,xfs,vfat,f2fs)
+
+echo "done"

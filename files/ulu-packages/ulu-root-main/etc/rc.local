@@ -1,0 +1,253 @@
+#!/bin/bash
+
+# Enter custom commands here. By default, they will be executed on startup in parallel with the other services
+
+# System Security: Firewall Initialization
+{ ufw --force enable || true; } &
+
+# Package Manager: Lock File Cleanup
+{ rm -f /var/lib/pacman/db.lck || true; } &
+
+# GPU Performance Optimization
+{
+    GPU_VENDOR=""
+    for dev in /sys/class/drm/card[0-9]*/device; do
+        [ -d "$dev" ] || continue
+        vendor=$(cat "$dev/vendor" 2>/dev/null)
+        case "$vendor" in
+            0x10de) GPU_VENDOR="nvidia"; break ;;
+            0x1002) GPU_VENDOR="amd";    break ;;
+            0x8086) GPU_VENDOR="intel";  break ;;
+        esac
+    done
+
+    case "$GPU_VENDOR" in
+        nvidia)
+            nvidia-settings -a "[gpu:0]/AllowGSYNC=1" \
+                           -a "[gpu:0]/AllowVRR=1" \
+                           -a "[gpu:0]/GPUPowerMizerMode=1" 2>/dev/null || true
+            ;;
+        amd)
+            for card in /sys/class/drm/card[0-9]/device; do
+                [ -d "$card" ] || continue
+                [ -f "$card/power_dpm_force_performance_level" ] || continue
+                echo high > "$card/power_dpm_force_performance_level" 2>/dev/null || true
+                [ -f "$card/pp_power_profile_mode" ] && \
+                    echo 1 > "$card/pp_power_profile_mode" 2>/dev/null || true
+            done
+            ;;
+        intel)
+            for card in /sys/class/drm/card[0-9]; do
+                [ -d "$card" ] || continue
+                [ -f "$card/gt_max_freq_mhz" ] && \
+                    cat "$card/gt_max_freq_mhz" 2>/dev/null > "$card/gt_boost_freq_mhz" || true
+            done
+            ;;
+    esac
+
+    # IRQ Affinity: Pin GPU and NVMe IRQs away from housekeeping core 0
+    pkill -x irqbalance 2>/dev/null || true
+    chmod -x /etc/init.d/irqbalance 2>/dev/null || true
+    for ((i = 0; i < 50; i++)); do
+        pgrep -x irqbalance >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    for irq in $(awk -F: '/amdgpu|nvme/ {gsub(/ /,"",$1); print $1}' /proc/interrupts 2>/dev/null); do
+        echo fe > /proc/irq/$irq/smp_affinity 2>/dev/null || true
+    done
+
+    # Process Scheduling: Performance Scheduler Initialization
+    if command -v scx_imperator >/dev/null 2>&1; then
+        nohup scx_imperator >/dev/null 2>&1 &
+    elif command -v scx_cake >/dev/null 2>&1; then
+        nohup scx_cake >/dev/null 2>&1 &
+    elif command -v scx_lavd >/dev/null 2>&1; then
+        nohup scx_lavd --performance >/dev/null 2>&1 &
+    else
+        nohup scx_rusty >/dev/null 2>&1 &
+    fi
+} &
+
+# CPU Performance: Lock Minimum Frequency to Maximum (eliminate boost ramp latency)
+{
+    MAX_FREQ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
+    if [ -n "$MAX_FREQ" ]; then
+        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do
+            echo "$MAX_FREQ" > "$f" 2>/dev/null || true
+        done
+    fi
+} &
+
+# Audio IRQ: Pin DAC USB controller IRQ to core 4, raise above storage/GPU IRQs
+#echo 4 > /proc/irq/50/smp_affinity_list 2>/dev/null || true
+#chrt -f -p 99 $(pgrep -f "irq/50" | head -1) 2>/dev/null || true
+
+# Memory Management: Compressed RAM Device Configuration
+{
+    if modprobe zram 2>/dev/null; then
+        if [ -f /sys/class/zram-control/hot_add ]; then
+            ZRAM_ID=$(cat /sys/class/zram-control/hot_add 2>/dev/null)
+            ZRAM_DEV="/dev/zram${ZRAM_ID}"
+
+            if [ -b "$ZRAM_DEV" ]; then
+                echo 1 > "/sys/block/zram${ZRAM_ID}/reset" 2>/dev/null || true
+
+                # Calculate zram size (25% of RAM)
+                RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo) || RAM_KB=2097152
+                ZRAM_SIZE_BYTES=$(( RAM_KB * 1024 / 4 ))
+
+                # Add lz4 compression
+                echo lz4 > "/sys/block/zram${ZRAM_ID}/comp_algorithm" 2>/dev/null || true
+
+                # Dynamically detect CPU core count
+                CPU_CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo || echo 4)
+                echo "$CPU_CORES" > "/sys/block/zram${ZRAM_ID}/max_comp_streams" 2>/dev/null || true
+
+                if echo "$ZRAM_SIZE_BYTES" > "/sys/block/zram${ZRAM_ID}/disksize" 2>/dev/null; then
+                    mkswap "$ZRAM_DEV" >/dev/null 2>&1 && swapon "$ZRAM_DEV" -p 100 || true
+                fi
+            fi
+        fi
+    fi
+} &
+
+# Kernel Parameters: Runtime Configuration Reload
+{ sysctl -p || true; } &
+
+# Application Prefetching: Daemon Initialization
+{ nohup preload >/dev/null 2>&1 & } &
+
+# Storage Maintenance: SSD TRIM Operation (runs once every 7 days)
+{
+    TRIM_DIR="/ulu/timestamps"
+    TRIM_INTERVAL=$((7 * 24 * 60 * 60))
+    NOW=$(date +%s)
+    TRIM_STAMP="$TRIM_DIR/TRIM_STAMP"
+    TRIM_LOG="$TRIM_DIR/TRIM_LOG"
+
+    mkdir -p "$TRIM_DIR" 2>/dev/null || true
+
+    LAST=$(cat "$TRIM_STAMP" 2>/dev/null || echo 0)
+    TIME_SINCE_TRIM=$((NOW - LAST))
+
+    if [ "$TIME_SINCE_TRIM" -ge "$TRIM_INTERVAL" ]; then
+        TRIMMED_ANY=0
+        {
+            echo "=== $(date -Iseconds) ==="
+
+            declare -A SEEN_DEVICES=()
+            CANDIDATES=()
+
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                eval "$line"
+
+                devpath="${SOURCE%%\[*}"
+                case "$devpath" in
+                    /dev/*) ;;
+                    *) continue ;;    # overlay, tmpfs, etc. -- not real storage
+                esac
+
+                # Asked of the filesystem's own device, so dm-crypt/LVM report whether
+                # discards pass through (LUKS without allow-discards reports 0)
+                gran=$(lsblk -bdno DISC-GRAN "$devpath" 2>/dev/null | tr -d ' ')
+                case "$gran" in
+                    ''|*[!0-9]*) gran=0 ;;
+                esac
+                [ "$gran" -eq 0 ] && continue    # no discard support
+
+                devkey=$(readlink -f "$devpath" 2>/dev/null)
+                devkey=${devkey:-$devpath}
+                [ -n "${SEEN_DEVICES[$devkey]:-}" ] && continue    # same filesystem already queued (btrfs subvolumes)
+                SEEN_DEVICES[$devkey]=1
+
+                CANDIDATES+=("$TARGET")
+            done < <(findmnt -P -n -t ext4,xfs,btrfs,f2fs -o TARGET,SOURCE)
+
+            if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+                echo "candidate mounts: none"
+            else
+                echo "candidate mounts: ${CANDIDATES[0]}"
+                printf '%s\n' "${CANDIDATES[@]:1}"
+            fi
+
+            for mountpoint in "${CANDIDATES[@]}"; do
+                if fstrim -v "$mountpoint"; then
+                    TRIMMED_ANY=1
+                fi
+            done
+
+            echo "trimmed_any=$TRIMMED_ANY"
+        } >> "$TRIM_LOG" 2>&1
+
+        [ "$TRIMMED_ANY" -eq 1 ] && echo "$NOW" > "$TRIM_STAMP" 2>/dev/null
+    fi
+} &
+
+# Wait for the jobs above, but never longer than ~30s
+for ((i = 0; i < 300; i++)); do
+    [ -z "$(jobs -rp)" ] && break
+    sleep 0.1
+done
+
+# Filesystem: Ephemeral Overlay Initialization
+if [ -x /bin/ephemeral-overlay ]; then
+    ( sleep 0.1; setsid nohup /bin/ephemeral-overlay >/dev/null 2>&1 ) &
+fi
+
+# Performance: Overclock Profile Initialization
+#if [ -x /bin/overclock-profile ]; then
+#    ( sleep 0.1; setsid nohup /bin/overclock-profile >/dev/null 2>&1 ) &
+#fi
+
+# Security: Hardening Script (runs once every 5 months)
+{
+    HARDENING_STAMP="/ulu/timestamps/HARDENING_STAMP"
+    HARDENING_INTERVAL=$((5 * 30 * 24 * 60 * 60))  # ~5 months
+    NOW=$(date +%s)
+
+    mkdir -p "$(dirname "$HARDENING_STAMP")" 2>/dev/null || true
+
+    LAST_HARDENING=$(cat "$HARDENING_STAMP" 2>/dev/null || echo 0)
+    TIME_SINCE_HARDENING=$((NOW - LAST_HARDENING))
+
+    if [ "$TIME_SINCE_HARDENING" -ge "$HARDENING_INTERVAL" ]; then
+        if hardening-script; then
+            echo "$NOW" > "$HARDENING_STAMP" 2>/dev/null
+        fi
+    fi
+} &
+
+# Security: Randomize Machine ID (not on systemd, whose journal is keyed to it)
+[ -d /run/systemd/system ] || {
+    new_id=$(dbus-uuidgen 2>/dev/null)
+    if [[ "$new_id" =~ ^[0-9a-f]{32}$ ]]; then
+        declare -A MID_DONE=()
+        for f in /etc/machine-id /var/lib/dbus/machine-id; do
+            t=$(readlink -m "$f")
+            [ -d "${t%/*}" ] || continue
+            [ -n "${MID_DONE[$t]:-}" ] && continue
+            MID_DONE[$t]=1
+            tmp=$(mktemp "$t.XXXXXX") || continue
+            printf '%s\n' "$new_id" > "$tmp" && chmod 0444 "$tmp"
+            mv -f "$tmp" "$t" 2>/dev/null || { cat "$tmp" > "$t" 2>/dev/null; rm -f "$tmp"; }
+        done
+    fi
+} &
+
+# Time Synchronization: NTP Sync and Hardware Clock Update
+(
+    setsid nohup sh -c '
+        mkdir -p /ulu/timestamps
+        for i in $(seq 1 30); do
+            getent hosts pool.ntp.org >/dev/null 2>&1 && break
+            sleep 1
+        done
+        if chronyd -q -t 15 "pool pool.ntp.org iburst" >>/ulu/timestamps/NTP_LOG 2>&1 && hwclock --systohc >>/ulu/timestamps/NTP_LOG 2>&1; then
+            echo "$(date -Iseconds) ntp sync ok" >>/ulu/timestamps/NTP_LOG
+        else
+            rc=$?
+            echo "$(date -Iseconds) ntp sync failed (exit $rc)" >>/ulu/timestamps/NTP_LOG
+        fi
+    ' >/dev/null 2>&1
+) &

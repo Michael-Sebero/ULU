@@ -1,0 +1,6 @@
+# Disable USB autosuspend, except where TLP is installed (laptops): there
+# USB_AUTOSUSPEND in /etc/tlp.conf decides, and this rule would override it
+TEST=="/etc/tlp.conf", GOTO="usb_no_autosuspend_end"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/autosuspend", ATTR{power/autosuspend}="-1"
+LABEL="usb_no_autosuspend_end"

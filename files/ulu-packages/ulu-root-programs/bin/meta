@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Check if a command-line argument was provided
+if [[ -n "$1" ]]; then
+    # Use the first argument as the file path
+    file_path="$1"
+else
+    # Prompt user for the file path if no argument is given
+    echo -n "Enter the path to the media file: "
+    read -r file_path
+fi
+
+# Check if the file exists
+if [[ ! -f "$file_path" ]]; then
+    echo "Error: File does not exist or is not a valid file."
+    exit 1
+fi
+
+# Run ffprobe with the desired options
+ffprobe -v quiet -print_format json -show_format -show_streams "$file_path"

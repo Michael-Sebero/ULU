@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# ---------------------------------------------------------------------------
+# Package manager detection
+# Arch systems check for paru first, falling back to pacman if paru isn't
+# installed. Everything else is matched to its native package manager.
+# ---------------------------------------------------------------------------
+detect_package_manager() {
+    if command -v paru &> /dev/null; then
+        echo "paru"
+    elif command -v pacman &> /dev/null; then
+        echo "pacman"
+    elif command -v apt-get &> /dev/null; then
+        echo "apt"
+    elif command -v dnf &> /dev/null; then
+        echo "dnf"
+    elif command -v zypper &> /dev/null; then
+        echo "zypper"
+    elif command -v xbps-install &> /dev/null; then
+        echo "xbps"
+    else
+        echo "none"
+    fi
+}
+
+PKG_MANAGER=$(detect_package_manager)
+
+if command -v doas &> /dev/null; then
+    PRIV=doas
+else
+    PRIV=sudo
+fi
+
+if [ "$PKG_MANAGER" = "none" ]; then
+    echo -e "\033[1mWarning: no supported package manager found (paru, pacman, apt, dnf, zypper, xbps).\033[0m" >&2
+    echo "Trying Flatpak only." >&2
+fi
+
+# Remove a list of packages by name with the detected package manager
+remove_packages() {
+    case "$PKG_MANAGER" in
+        paru)
+            paru -Rdd "$@"
+            ;;
+        pacman)
+            $PRIV pacman -Rdd --noconfirm "$@"
+            ;;
+        apt)
+            $PRIV apt-get remove -y "$@"
+            ;;
+        dnf)
+            $PRIV dnf remove -y "$@"
+            ;;
+        zypper)
+            $PRIV zypper --non-interactive remove "$@"
+            ;;
+        xbps)
+            $PRIV xbps-remove -y "$@"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if remove_packages "$@"; then
+    :
+elif flatpak uninstall "$@"; then
+    :
+fi

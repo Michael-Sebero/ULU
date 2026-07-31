@@ -1,0 +1,225 @@
+#!/bin/bash
+
+echo -e "\033[1mResetting permissions...\033[0m"
+
+# Helper: lift immutable flag if set, chmod, then restore
+chmod_maybe_immutable() {
+    local mode="$1"
+    local file="$2"
+    [ -e "$file" ] || return 0
+    local was_immutable=0
+    if lsattr "$file" 2>/dev/null | grep -q '^....i'; then
+        was_immutable=1
+        chattr -i "$file"
+    fi
+    chmod "$mode" "$file"
+    [ "$was_immutable" -eq 1 ] && chattr +i "$file"
+}
+
+# /bin: only ULU's own programs. A blanket chmod 755 over /bin would strip the
+# setuid bit from su, passwd, doas and friends on systems where /bin isn't a symlink.
+ULU_PROGRAMS=(
+    av clean errors ks meta optional overclock-profile p remove reset-permissions
+    rollback stalk update update-boot boot-params upgrade verify
+    alarm compare-objects disable-ipv6 fix-xfs plan-s refresh-keyring regedit
+    timed-shutdown timer tools winedir
+    pd scx_imperator scx_aura hardening-script ephemeral-overlay steal game-focus
+)
+for p in "${ULU_PROGRAMS[@]}"; do
+    [ -f "/bin/$p" ] || continue
+    chown root:root "/bin/$p"
+    chmod 755 "/bin/$p"
+done
+
+# /ulu (timestamps and logs written by rc.local)
+if [ -d /ulu ]; then
+    find /ulu -type d -exec chmod 755 {} +
+    find /ulu -type f -exec chmod 644 {} +
+fi
+
+# /etc
+chmod_maybe_immutable 644 /etc/login.defs
+chmod_maybe_immutable 644 /etc/sysctl.conf
+for f in /etc/makepkg.conf /etc/dnsmasq.conf /etc/preload.conf \
+          /etc/lsb-release /etc/profile /etc/resolv.conf \
+          /etc/paru.conf; do
+    chmod 644 "$f" 2>/dev/null || true
+done
+chmod 755 /etc/rc.local 2>/dev/null || true
+
+# /etc/doas
+if [ -f /etc/doas.conf ]; then
+    chown root:root /etc/doas.conf
+    chmod 640 /etc/doas.conf
+fi
+
+# /etc/default
+chmod 755 /etc/default 2>/dev/null || true
+for f in /etc/default/grub /etc/default/grub.local /etc/default/earlyoom /etc/default/ufw; do
+    chmod 644 "$f" 2>/dev/null || true
+done
+# Desktop
+chmod 644 /etc/default/cpupower 2>/dev/null || true
+chmod 644 /etc/default/cpupower-service.conf 2>/dev/null || true
+chmod 644 /etc/conf.d/cpupower  2>/dev/null || true
+chmod 644 /etc/gamemode.ini      2>/dev/null || true
+# Laptop
+chmod 644 /etc/tlp.conf 2>/dev/null || true
+if [ -f /etc/bluetooth/main.conf ]; then
+    chmod 755 /etc/bluetooth
+    chmod 644 /etc/bluetooth/main.conf
+fi
+
+# /etc/modprobe.d
+chmod 755 /etc/modprobe.d 2>/dev/null || true
+chmod 644 /etc/modprobe.d/audio-powersave.conf 2>/dev/null || true
+chmod 644 /etc/modprobe.d/nvidia.conf          2>/dev/null || true
+
+# /etc/modules-load.d
+chmod 755 /etc/modules-load.d 2>/dev/null || true
+chmod 644 /etc/modules-load.d/zfs.conf 2>/dev/null || true
+
+# /etc/udev
+chmod 755 /etc/udev 2>/dev/null || true
+chmod_maybe_immutable 644 /etc/udev/udev.conf
+chmod 755 /etc/udev/rules.d 2>/dev/null || true
+for r in \
+    /etc/udev/rules.d/60-ssd-io-scheduler.rules \
+    /etc/udev/rules.d/91-usb-no-autosuspend.rules \
+    /etc/udev/rules.d/99-udisks2-noatime.rules; do
+    chmod 644 "$r" 2>/dev/null || true
+done
+
+# /etc/pam.d
+chmod 755 /etc/pam.d 2>/dev/null || true
+chmod 644 /etc/pam.d/doas        2>/dev/null || true
+chmod 644 /etc/pam.d/system-auth 2>/dev/null || true
+
+# /etc/security
+chmod 755 /etc/security             2>/dev/null || true
+chmod 644 /etc/security/limits.conf 2>/dev/null || true
+chmod 755 /etc/security/limits.d    2>/dev/null || true
+for f in \
+    /etc/security/limits.d/10-gamemode.conf \
+    /etc/security/limits.d/99-realtime-privileges.conf; do
+    chmod 644 "$f" 2>/dev/null || true
+done
+
+# /etc/ssh
+chmod 755 /etc/ssh             2>/dev/null || true
+chmod 600 /etc/ssh/sshd_config 2>/dev/null || true
+
+# /etc/audit
+chmod 750 /etc/audit             2>/dev/null || true
+chmod 640 /etc/audit/auditd.conf 2>/dev/null || true
+
+# /etc/fail2ban (desktop)
+if [ -d /etc/fail2ban ]; then
+    chmod 755 /etc/fail2ban
+    for f in fail2ban.local jail.local paths-overrides.local; do
+        chmod 644 "/etc/fail2ban/$f" 2>/dev/null || true
+    done
+fi
+
+# /etc/dkms
+chmod 755 /etc/dkms                2>/dev/null || true
+chmod 644 /etc/dkms/framework.conf 2>/dev/null || true
+
+# /etc/dnscrypt-proxy
+chmod 755 /etc/dnscrypt-proxy                     2>/dev/null || true
+chmod 644 /etc/dnscrypt-proxy/dnscrypt-proxy.toml 2>/dev/null || true
+
+# /etc/NetworkManager
+chmod 755 /etc/NetworkManager                             2>/dev/null || true
+chmod 644 /etc/NetworkManager/NetworkManager.conf         2>/dev/null || true
+# NetworkManager ignores dispatcher scripts unless they're root-owned and 755
+if [ -f /etc/NetworkManager/dispatcher.d/90-dns-stack-restart ]; then
+    chown root:root /etc/NetworkManager/dispatcher.d/90-dns-stack-restart
+    chmod 755 /etc/NetworkManager/dispatcher.d/90-dns-stack-restart
+fi
+
+# /etc/ufw
+chmod 755 /etc/ufw 2>/dev/null || true
+for f in ufw.conf before.rules before6.rules after.rules after6.rules \
+         user.rules user6.rules; do
+    chmod 640 "/etc/ufw/$f" 2>/dev/null || true
+done
+chmod 755 /etc/ufw/applications.d 2>/dev/null || true
+find /etc/ufw/applications.d -type f -exec chmod 644 {} + 2>/dev/null || true
+
+# /etc/profile.d (desktop)
+chmod 755 /etc/profile.d 2>/dev/null || true
+
+# /etc/xdg
+find /etc/xdg -type d -exec chmod 755 {} + 2>/dev/null || true
+find /etc/xdg -type f -exec chmod 644 {} + 2>/dev/null || true
+
+# /home (ulu-optional)
+ULU_HOME_PATHS=(
+    "644 .bashrc"
+
+    "keep .config"
+    "644 .config/arkrc"
+    "755 .config/FreeTube"
+    "644 .config/FreeTube/settings.db"
+    "755 .config/haruna"
+    "644 .config/haruna/custom-commands.conf"
+    "644 .config/haruna/haruna.conf"
+    "644 .config/klaunchrc"
+    "644 .config/konsole.kmessagebox"
+    "755 .config/mpv"
+    "644 .config/mpv/mpv.conf"
+    "644 .config/okularpartrc"
+
+    "keep .local"
+    "keep .local/share"
+    "755 .local/share/TauonMusicBox"
+    "644 .local/share/TauonMusicBox/state.p"
+    "644 .local/share/TauonMusicBox/tauon.conf"
+
+    "644 .nvidia-settings-rc"
+)
+
+# Helper: hand a root-owned path back to the user, then set its mode
+reset_home_path() {
+    local mode="$1"
+    local path="$2"
+    local owner="$3"
+    local cur_user cur_group
+
+    # Skip missing paths, and never follow a symlink out of the home dir
+    [ -e "$path" ] && [ ! -L "$path" ] || return 0
+
+    read -r cur_user cur_group < <(stat -c '%U %G' "$path")
+    if [ "$cur_user" = root ] || [ "$cur_group" = root ]; then
+        chown "$owner:$owner" "$path" 2>/dev/null || true
+    fi
+
+    [ "$mode" = keep ] || chmod "$mode" "$path" 2>/dev/null || true
+}
+
+chmod 755 /home || true
+
+for homedir in /home/*; do
+    [ -d "$homedir" ] || continue
+    owner=$(stat -c '%U' "$homedir")
+
+    chmod 750 "$homedir"
+
+    for entry in "${ULU_HOME_PATHS[@]}"; do
+        read -r mode rel <<< "$entry"
+        reset_home_path "$mode" "$homedir/$rel" "$owner"
+    done
+done
+
+# /run/user
+for rundir in /run/user/[0-9]*/; do
+    uid="${rundir##*/run/user/}"
+    uid="${uid%/}"
+    owner=$(id -un "$uid" 2>/dev/null) || continue
+    chown -R "$owner:$owner" "$rundir/app"         2>/dev/null || true
+    chown -R "$owner:$owner" "$rundir/.dbus-proxy" 2>/dev/null || true
+    chown -R "$owner:$owner" "$rundir/.flatpak"    2>/dev/null || true
+done
+
+echo "[DONE] Permissions reset to defaults."

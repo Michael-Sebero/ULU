@@ -1,0 +1,11 @@
+### QT Config ###
+QTWEBENGINE_CHROMIUM_FLAGS="-blink-settings=darkModeEnabled=true --enable-features=VaapiVideoDecoder,OverlayScrollbar,VaapiVideoEncoder,OverlayScrollbarFlashAfterAnyScrollUpdate,OverlayScrollbarFlashWhenMouseEnter,CanvasOopRasterization,BackForwardCache,ParallelDownloading --disable-features=UseChromeOSDirectVideoDecoder --enable-gpu-rasterization --enable-zero-copy --num-raster-threads=8"
+
+### Mesa/Vulkan Config (AMD RDNA 4 - Radeon RX 9070) ###
+AMD_VULKAN_ICD=RADV
+
+### Wine/Proton Config ###
+VKD3D_SHADER_CACHE_PATH=$HOME/.cache/vkd3d
+
+### Locale ###
+LANG=en_US.UTF-8

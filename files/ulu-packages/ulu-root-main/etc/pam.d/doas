@@ -1,0 +1,9 @@
+#%PAM-1.0
+auth            include         system-auth
+account         include         system-auth
+# Custom session configuration that bypasses standard limits
+session         required        pam_env.so
+session         required        pam_unix.so
+session         optional        pam_permit.so
+# Comment out the pam_limits.so line or add a modified version
+# session       required        pam_limits.so

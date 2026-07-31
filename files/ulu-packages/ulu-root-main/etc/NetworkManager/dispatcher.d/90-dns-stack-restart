@@ -1,0 +1,27 @@
+#!/bin/sh
+# Restart dnscrypt-proxy and dnsmasq once a connection is up, if either is down.
+# dnscrypt-proxy exits when its bootstrap query fails before the link is usable.
+# NetworkManager skips dispatcher scripts that aren't root-owned mode 755.
+
+case "$2" in
+    up|vpn-up) ;;
+    *) exit 0 ;;
+esac
+
+ensure_running() {
+    if [ -d /run/systemd/system ]; then
+        systemctl is-active --quiet "$1" || systemctl restart "$1"
+    elif [ -d /run/openrc ]; then
+        rc-service "$1" status >/dev/null 2>&1 || rc-service "$1" restart
+    elif [ "$(cat /proc/1/comm)" = dinit ]; then
+        dinitctl start "$1" >/dev/null 2>&1
+    elif command -v s6-rc >/dev/null 2>&1 && [ "$(cat /proc/1/comm)" = s6-svscan ]; then
+        s6-rc -u change "$1" >/dev/null 2>&1
+    elif command -v sv >/dev/null 2>&1; then
+        sv up "$1" >/dev/null 2>&1
+    fi
+}
+
+ensure_running dnscrypt-proxy
+ensure_running dnsmasq
+exit 0
