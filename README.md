@@ -1,8 +1,18 @@
-<div align="center">
-	<img src="https://i.postimg.cc/TYCbKN6L/Life.png" width="25%" />
-</div>
-
+<p align="center">
+	<img src="https://i.postimg.cc/90gfzGTT/tux-glasses.png" width="25%" />
+</p>
 <br>
+
+<p align="center">
+	<img src="https://i.postimg.cc/fbvDJcnG/740019dcf9a94a804d725079cedf0e2f250ea164da39a3ee5e6b4b0d3255bfef95601890afd80709da39a3ee5e6b4b0d3255.png" width="65%" />
+</p>
+
+## Summary / TLDR
+This project is a combination of significant upgrades and micro-optimizations. I've implemented most of the known and esoteric Linux performance tweaks along with some original implementations. The philosophy behind this configuration set is to utilize current hardware features and resources generously (when needed) while increasing system hardness greatly beyond the default.
+
+The configuration files `sysctl.conf`, `limits.conf` and `grub` are pre-configured for specific workloads. Depending on the variant chosen, there are specific changes tailored for each. These presets are **AMD/Intel**, **NVIDIA**, **Laptop**, **Performance**, **Server** and **LLM**. They can be chosen in the installer and by running the `optional` command post-installation.
+
+Originally, I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxyz/LARBS), which is why ULU's installer is script-based. This project is packaged similarly to an ISO due to the configurations and content being stored inside various archives. If you want to see what changes I've made, you can view them [here](https://github.com/Michael-Sebero/ULU/tree/main/files/ulu-packages).
 
 ## **Core Components**
 
@@ -20,43 +30,68 @@
 * [Fail2Ban](https://github.com/fail2ban/fail2ban) - Intrusion prevention tool that bans IPs showing malicious signs
 * [Linux Hardening Script](https://github.com/Michael-Sebero/Linux-Hardening-Script) - Automated system security and configuration hardening script
 * [Lynis](https://github.com/CISOfy/lynis) - Security auditing tool
-* [USBGuard](https://github.com/USBGuard/usbguard) - Framework for implementing USB device authorization policies
 * [UFW](https://en.wikipedia.org/wiki/Uncomplicated_Firewall) - Interface for managing iptables-based firewalls
 
 ### **Additional Features**
-* Includes a comprehensive [manual](https://raw.githubusercontent.com/Michael-Sebero/Algiz-Linux/refs/heads/main/files/algiz-manual/Manual)
-* MAC address randomization via [Macchanger](https://www.kali.org/tools/macchanger/)
-* Low latency [PipeWire](https://github.com/PipeWire/pipewire) audio processing
-* [ALHP](https://wiki.archlinux.org/title/Unofficial_user_repositories#ALHP), [Chaotic AUR](https://github.com/chaotic-aur/packages) and [Flatpak](https://flatpak.org/) repositories
+* Includes a comprehensive [manual](https://raw.githubusercontent.com/Michael-Sebero/ULU/refs/heads/main/files/ulu-manual/Manual)
+* Machine ID and MAC address randomization
+* [ALHP](https://wiki.archlinux.org/title/Unofficial_user_repositories#ALHP), [Chaotic AUR](https://github.com/chaotic-aur/packages) (for Arch-based systems) and [Flatpak](https://flatpak.org/) repositories
 * Steam [Proton GE](https://github.com/GloriousEggroll/proton-ge-custom) prefix
 * [Booster](https://github.com/anatol/booster) - Faster mkinitcpio replacement
 * Battery life optimizations for laptops via [TLP](https://github.com/linrunner/TLP)
-* [System Tuner](https://github.com/Michael-Sebero/System-Tuner) - Laptop performance manager
-* Some processes are launched under [Mimalloc](https://github.com/microsoft/mimalloc), a high-performance memory allocator replacement
+* Some processes are enhanced by [Mimalloc](https://github.com/microsoft/mimalloc), a high-performance memory allocator replacement
 * [Ephemeral Overlay](https://github.com/Michael-Sebero/Ephemeral-Overlay) - Speeds up temporary/root directories and reduces disk I/O
 * [Real-time](https://gitlab.archlinux.org/archlinux/packaging/packages/realtime-privileges) audio processing
-* A [Lynis](https://github.com/CISOfy/lynis) system hardening rating of **82**
+* A [Lynis](https://github.com/CISOfy/lynis) system hardening rating of **78** (on the latest Lynis version)
 * [GameMode](https://github.com/FeralInteractive/gamemode) - Performance on demand utility for games
 * [SCX](https://github.com/sched-ext/scx) - Dynamic scheduler extension framework
 * [Game Focus](https://github.com/Michael-Sebero/Game-Focus) - A command that kills most system processes and launches Steam
-* [Arch Package Dictionary](https://github.com/Michael-Sebero/Arch-Package-Dictionary) - Pacman/AUR/Flatpak search tool
-* A suite of productivity tools: [Archivist Tools](https://github.com/Michael-Sebero/Archivist-Tools), [Audio Frequency Tools](https://github.com/Michael-Sebero/Audio-Frequency-Tools), [Document Tools](https://github.com/Michael-Sebero/Document-Tools), [Media Tools](https://github.com/Michael-Sebero/Media-Tools)
+* [Package Dictionary](https://github.com/Michael-Sebero/Package-Dictionary) - Package search tool
 * [Earlyoom](https://github.com/rfjakob/earlyoom) - Early OOM daemon
-* [Fix Arch Linux](https://github.com/Michael-Sebero/Fix-Arch-Linux) - Diagnostic toolset
+* [Nix](https://nixos.org/) - Universal package manager
+* [Limine](https://github.com/limine-bootloader/limine) - Fast Linux bootloader
 
-## Summary / TLDR
-This project is a combination of significant upgrades and micro-optimizations. I've implemented most of the known and esoteric Linux performance tweaks along with some original implementations. The philosophy behind this "meta-distribution" is to utilize current hardware features and resources generously (when needed) while increasing system hardness greatly beyond the default.
+<div align="center">
 
-The configuration files `sysctl.conf`, `limits.conf` and `grub` are pre-configured for specific workloads. Depending on the variant chosen, there are specific changes tailored for each. These presets are **AMD/Intel**, **NVIDIA**, **Laptop**, **Performance**, **Low RAM**, **Server** and **LLM**. They can be chosen in the installer and by running the `optional` command post-installation.
+## Feature Coverage
 
-Originally, I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxyz/LARBS), which is why Algiz's installer is script-based rather than an ISO. This project is packaged similarly to an ISO due to the configurations and content being stored inside various archives. If you want to see what changes I've made, you can view them [here](https://github.com/Michael-Sebero/Algiz-Linux/tree/main/files/algiz-packages).
+| Feature | Arch-based | Void Linux | Debian-based |
+|:--|:---:|:---:|:---:|
+| **SCX** | ✅ | ✅ | ✅ |
+| **AppArmor** | ✅ | ✅ | ✅ |
+| **Chkrootkit** | ✅ | ✅ | ✅ |
+| **ClamAV** | ✅ | ✅ | ✅ |
+| **DNSCrypt** | ✅ | ✅ | ✅ |
+| **DNSMasq** | ✅ | ✅ | ✅ |
+| **Fail2Ban** | ✅ | ✅ | ✅ |
+| **Linux Hardening Script** | ✅ | ✅ | ✅ |
+| **Lynis** | ✅ | ✅ | ✅ |
+| **UFW** | ✅ | ✅ | ✅ |
+| **x86-64-v3 Kernel** | ✅ | ❌ | ✅ |
+| **x86-64-v3/v4 Repositories** | ✅ | ❌ | ❌ |
+| **Booster** | ✅ | ✅ | ❌ |
+| **Limine** | ✅ | ✅ | ❌ |
+| **Machine ID/MAC Randomization** | ✅ | ✅ | ✅ |
+| **Flatpak** | ✅ | ✅ | ✅ |
+| **Proton GE** | ✅ | ❌ | ❌ |
+| **TLP** | ✅ | ✅ | ✅ |
+| **Mimalloc** | ✅ | ✅ | ✅ |
+| **Ephemeral Overlay** | ✅ | ✅ | ✅ |
+| **Real-time Audio** | ✅ | ✅ | ✅ |
+| **GameMode** | ✅ | ✅ | ✅ |
+| **Game Focus** | ✅ | ✅ | ✅ |
+| **Package Dictionary** | ✅ | ✅ | ✅ |
+| **Earlyoom** | ✅ | ✅ | ✅ |
+| **Nix** | ✅ | ✅ | ✅ |
+
+</div>
 
 ---
 
-## How Algiz Linux Works
+## How ULU Works
 
 ### Kernel & Security Hardening
-Algiz Linux implements kernel hardening that enhances both security and performance.
+ULU implements kernel hardening that enhances both security and performance.
 
 **Attack Surface Reduction:**
 - Restricted ptrace access prevents privilege escalation attacks
@@ -92,24 +127,26 @@ RAM usage has the highest priority over swapping. Keeping active data in memory 
 - `/home/$USER/.cache/mesa_shader_cache` - Mesa shader cache
 - `/home/$USER/.cache/mesa_shader_cache_db` - Mesa shader database
 
+These directories are bind-mounted from disk into the TMPFS above them, so they persist across reboots while the rest of the cache doesn't.
+
 *RAM Overlay of System Directories:*
 - `/etc` - System configuration files
 - `/var/log` - System logs
-- Changes are stored in RAM and automatically synced to disk on logout
+- Each directory is mounted as an OverlayFS: the real directory becomes the lower layer and a RAM-backed upper layer absorbs all writes. Changes sync back to disk every 5 minutes, `/etc` also syncs within 30 seconds of a write and a final sync runs on logout.
 
 *Excluded Directories:*
 - `/home` - User data
-- `/tmp`, `/var/tmp`, `/var/cache` - Already on tmpfs
+- `/tmp`, `/var/tmp`, `/var/cache` - Already on TMPFS
 - `/proc`, `/sys`, `/dev`, `/run` - Virtual/runtime filesystems
 - `/mnt`, `/media`, `/boot` - Mount points and boot files
 
 **Automatic Garbage Collection:**
-* Periodic cleanup every 60 seconds removes stale files older than 10 minutes from temporary directories
-* File-in-use detection ensures active files are never deleted
+* Periodic cleanup every 30 seconds removes stale files older than 5 minutes from temporary directories
+* File-in-use detection (via `lsof`, falling back to `fuser` or `/proc`) ensures active files are never deleted
 * Reduces RAM pressure and maintains optimal overlay performance
 
 ### Network Management
-Network performance leverages `BBR` congestion control and `cake` queue management to improve performance and reduce latency. The TCP stack uses expanded buffer sizes and enables fast connection establishment. IPv6 is limited through restrictive ICMP and routing settings. NetworkManager is set to use `dhclient` for DHCP with hostname handling disabled, along with DNS encryption via [Mullvad](https://mullvad.net/en).
+Network performance leverages `BBR` congestion control and `cake` queue management to improve performance and reduce latency. The TCP stack uses expanded buffer sizes and enables fast connection establishment. IPv6 is limited through restrictive ICMP and routing settings. NetworkManager is set to use `dhclient` for DHCP with hostname handling disabled, along with DNS encryption via [LibreDNS](https://libredns.gr/).
 
 ### Filesystem & I/O Optimization
 Disk and SSD performance is tuned through scheduler and queue optimizations. Both NVMe and SATA SSDs use the `none` scheduler to eliminate scheduling overhead and maximize throughput, while HDDs use `bfq` for fairness under mixed workloads. Read-ahead is set to 512 KB for SSDs and 2048 KB for HDDs to improve sequential read performance. I/O queue depth is configured at 2048 for NVMe drives, 1024 for SATA SSDs and 128 for HDDs, enabling optimal parallelism for each device type. I/O request merging is enabled to combine adjacent requests for improved efficiency.
@@ -117,7 +154,7 @@ Disk and SSD performance is tuned through scheduler and queue optimizations. Bot
 **F2FS:** Root and home partitions formatted with F2FS are optimized with background garbage collection enabled and tuned idle detection intervals to maintain flash-based storage performance consistency. To preserve SSD longevity and prevent write performance degradation, the system runs TRIM operations once every 7 days, reclaiming unused blocks. These processes ensure efficient resource use across F2FS filesystems.
 
 ### CPU Architecture Detection & ALHP Package Integration
-CPU architecture is automatically detected on installation to ensure optimal package installation. The system integrates some of ALHP's packages, which provide architecture-specific builds optimized for modern processor capabilities while keeping Artix's core system packages.
+CPU architecture is automatically detected on installation to ensure optimal package installation. The system integrates some of ALHP's packages, which provide architecture-specific builds optimized for modern processor capabilities while keeping the system's core system packages.
 
 ## Hardware-Specific Presets
 
@@ -125,13 +162,10 @@ CPU architecture is automatically detected on installation to ensure optimal pac
 Configured for AMD hardware, tweaked for high performance and security.
 
 ### NVIDIA
-Configured for NVIDIA hardware, tweaked for maximum visual fidelity, high performance and security.
+Configured for NVIDIA hardware, tweaked for high performance and security.
 
 ### Laptop
-Balanced between power saving, performance and security. At 85% battery + AC connection, performance is increased and reduced at 10%.
-
-### Low RAM
-Focused on swapping and ZRAM generation. This can make a system with 8G function like it has 10-12G.
+Balanced between power saving, performance and security. At 85% battery + AC connection, performance is comparable to desktop. 
 
 ## Optional Workload-Specific Presets
 
@@ -139,16 +173,13 @@ Focused on swapping and ZRAM generation. This can make a system with 8G function
 Maximum performance configuration with no security mitigations and expanded memory limits.
 
 ### Server
-The system expands TCP/UDP buffer sizes up to 16MB for high-performance connections. TCP stack handling is tuned for scalability with up to 2 million TIME_WAIT sockets, window scaling and reuse enabled for faster turnaround. Security and stability are reinforced with SYN cookies, strict reverse path filtering, martian packet logging, disabled source routing and ICMP redirects. IPv4/IPv6 are hardened with rate limiting for ICMP and disabled router advertisements.
+Small-scale NAS configuration for file sharing and hosting.
 
 ### LLM
 Specialized for LLM workloads with larger HugePages allocation and no security mitigations.
 
-<p align="center">
-	<img src="https://i.postimg.cc/C53HDLTZ/ksnip-20240224-100057.png" />
-</p>
-
-## Donations and Contact
+## Contact and Donations
 * [Email](michaelsebero@disroot.org)
-* [Matrix](https://matrix.to/#/#algiz-linux:matrix.org)
 * [PayPal](https://www.paypal.com/donate/?cmd=_donations&business=YYGU9JWJEE2AG)
+
+**EST. Since 2022**
