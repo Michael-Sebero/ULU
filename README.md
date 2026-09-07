@@ -55,7 +55,7 @@ Originally, I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithx
 * Some processes are enhanced by [Mimalloc](https://github.com/microsoft/mimalloc), a high-performance memory allocator replacement
 * [Ephemeral Overlay](https://github.com/Michael-Sebero/Ephemeral-Overlay) - Speeds up temporary/root directories and reduces disk I/O
 * [Real-time](https://gitlab.archlinux.org/archlinux/packaging/packages/realtime-privileges) audio processing
-* A [Lynis](https://github.com/CISOfy/lynis) system hardening rating of **82**
+* A [Lynis](https://github.com/CISOfy/lynis) system hardening rating of **82** (on the latest Lynis version)
 * [GameMode](https://github.com/FeralInteractive/gamemode) - Performance on demand utility for games
 * [SCX](https://github.com/sched-ext/scx) - Dynamic scheduler extension framework
 * [Game Focus](https://github.com/Michael-Sebero/Game-Focus) - A command that kills most system processes and launches Steam
@@ -105,20 +105,22 @@ RAM usage has the highest priority over swapping. Keeping active data in memory 
 - `/home/$USER/.cache/mesa_shader_cache` - Mesa shader cache
 - `/home/$USER/.cache/mesa_shader_cache_db` - Mesa shader database
 
+These directories are bind-mounted from disk into the TMPFS above them, so they persist across reboots while the rest of the cache doesn't.
+
 *RAM Overlay of System Directories:*
 - `/etc` - System configuration files
 - `/var/log` - System logs
-- Changes are stored in RAM and automatically synced to disk on logout
+- Each directory is mounted as an OverlayFS: the real directory becomes the lower layer and a RAM-backed upper layer absorbs all writes. Changes sync back to disk every 5 minutes, `/etc` also syncs within 30 seconds of a write and a final sync runs on logout.
 
 *Excluded Directories:*
 - `/home` - User data
-- `/tmp`, `/var/tmp`, `/var/cache` - Already on tmpfs
+- `/tmp`, `/var/tmp`, `/var/cache` - Already on TMPFS
 - `/proc`, `/sys`, `/dev`, `/run` - Virtual/runtime filesystems
 - `/mnt`, `/media`, `/boot` - Mount points and boot files
 
 **Automatic Garbage Collection:**
-* Periodic cleanup every 60 seconds removes stale files older than 10 minutes from temporary directories
-* File-in-use detection ensures active files are never deleted
+* Periodic cleanup every 30 seconds removes stale files older than 5 minutes from temporary directories
+* File-in-use detection (via `lsof`, falling back to `fuser` or `/proc`) ensures active files are never deleted
 * Reduces RAM pressure and maintains optimal overlay performance
 
 ### Network Management

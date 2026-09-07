@@ -8,6 +8,7 @@ if command -v pacman &>/dev/null; then
 ##############################
 
 ### DISTRO DETECTION ###
+
 detect_distro() {
     local os_id
     os_id=$(. /etc/os-release 2>/dev/null; echo "$ID")
@@ -24,6 +25,7 @@ detect_distro() {
 DISTRO=$(detect_distro)
 
 ### RESOLVE INIT-SPECIFIC PACKAGE NAME ###
+
 init_pkg() {
     local base_pkg="$1"
     if [ "$INIT_SYSTEM" = "systemd" ]; then
@@ -34,6 +36,7 @@ init_pkg() {
 }
 
 ### INIT SYSTEM DETECTION ###
+
 detect_init_system() {
     if pacman -Qi runit &>/dev/null; then
         echo "runit"
@@ -65,7 +68,65 @@ else
     INIT_SYSTEM="systemd"
 fi
 
+### CPU MICROARCHITECTURE DETECTION ###
+
+detect_cpu_level() {
+    local lvl
+
+    lvl=$(/lib/ld-linux-x86-64.so.2 --help 2>&1 \
+            | grep -v '\''not supported'\'' \
+            | grep -E '\''\(supported'\'' \
+            | head -n 1 | awk '\''{print $1}'\'')
+    case "$lvl" in
+        x86-64-v4) echo "v4" ;;
+        x86-64-v3) echo "v3" ;;
+        *)         echo "" ;;
+    esac
+}
+
+write_pacman_conf() {
+    local distro="$1" cpu_level="$2" alhp_ok="$3"
+    local arch_line base_mirrorlist native_repos tiered_repos repo
+
+    case "$cpu_level" in
+        v3) arch_line="x86_64 x86_64_v3" ;;
+        v4) arch_line="x86_64 x86_64_v4" ;;
+        *)  arch_line="auto" ;;
+    esac
+
+    if [ "$distro" = "artix" ]; then
+        native_repos="system world galaxy lib32"
+        tiered_repos="extra multilib"
+        base_mirrorlist="/etc/pacman.d/mirrorlist-arch"
+    else
+        native_repos=""
+        tiered_repos="core extra multilib"
+        base_mirrorlist="/etc/pacman.d/mirrorlist"
+    fi
+
+    {
+        printf '\''[options]\nHoldPkg     = pacman glibc\nArchitecture = %s\nColor\nParallelDownloads = 10\nSigLevel    = Required DatabaseOptional\nLocalFileSigLevel = Optional\n\n'\'' "$arch_line"
+
+        for repo in $native_repos; do
+            printf '\''[%s]\nInclude = /etc/pacman.d/mirrorlist\n\n'\'' "$repo"
+        done
+
+        for repo in $tiered_repos; do
+            if [ "$alhp_ok" = "true" ]; then
+                [ "$cpu_level" = "v4" ] && printf '\''[%s-x86-64-v4]\nInclude = /etc/pacman.d/alhp-mirrorlist\n\n'\'' "$repo"
+                { [ "$cpu_level" = "v3" ] || [ "$cpu_level" = "v4" ]; } && printf '\''[%s-x86-64-v3]\nInclude = /etc/pacman.d/alhp-mirrorlist\n\n'\'' "$repo"
+            fi
+            printf '\''[%s]\nInclude = %s\n\n'\'' "$repo" "$base_mirrorlist"
+        done
+
+        [ "$distro" = "artix" ] && printf '\''[auris]\nSigLevel = Required\nServer = https://auris.artixlinux.org/api/packages/auris/arch/$repo/$arch\n\n'\''
+
+        printf '\''[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist\n'\''
+    } > /etc/pacman.conf
+}
+
 ### INSTALL PACKAGES ONE BY ONE WITH RETRIES ###
+
 careful_install() {
   local failed_packages=()
   for pkg in "$@"; do
@@ -96,11 +157,56 @@ careful_install() {
 }
 
 ### SERVICE MANAGEMENT FUNCTIONS ###
+
+s6_resolve_name() {
+    local name="$1" candidate known
+    known=$(s6-rc-db list all 2>/dev/null)
+    for candidate in "$name" "${name,,}" "${name}-srv" "${name,,}-srv"; do
+        if grep -qx "$candidate" <<< "$known"; then
+            echo "$candidate"
+            return
+        fi
+    done
+    for candidate in "$name" "${name,,}" "${name}-srv" "${name,,}-srv"; do
+        if [ -d "/etc/s6/sv/$candidate" ] || [ -d "/etc/s6/adminsv/$candidate" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo "$name"
+}
+
+S6_REPO_SYNCED=false
+s6_sync_repo_once() {
+    if [ "$S6_REPO_SYNCED" != "true" ] && command -v s6 >/dev/null 2>&1; then
+        s6 repository sync >/dev/null 2>&1 || true
+        S6_REPO_SYNCED=true
+    fi
+}
+
 add_service() {
     local service_name="$1"
     case "$INIT_SYSTEM" in
         s6)
-            s6 set enable "$service_name"
+            local s6_name
+            s6_name=$(s6_resolve_name "$service_name")
+            if command -v s6 >/dev/null 2>&1; then
+                if ! s6 set enable -p "$s6_name" >/dev/null 2>&1; then
+                    s6_sync_repo_once
+                    if ! s6 set enable -p "$s6_name" >/dev/null 2>&1; then
+                        echo "Warning: s6 set enable $s6_name failed even after a repository sync; falling back to legacy contents.d (may not take effect on newer s6-frontend setups)." >&2
+                        if [ -d "/etc/s6/sv/$s6_name" ] || [ -d "/etc/s6/adminsv/$s6_name" ]; then
+                            mkdir -p /etc/s6/adminsv/default/contents.d
+                            touch "/etc/s6/adminsv/default/contents.d/$s6_name"
+                        else
+                            echo "Warning: could not enable or locate an s6 service for $service_name, resolved as $s6_name." >&2
+                        fi
+                    fi
+                fi
+            elif [ -d "/etc/s6/sv/$s6_name" ] || [ -d "/etc/s6/adminsv/$s6_name" ]; then
+                mkdir -p /etc/s6/adminsv/default/contents.d
+                touch "/etc/s6/adminsv/default/contents.d/$s6_name"
+            fi
             ;;
         openrc)
             rc-update add "$service_name" default
@@ -121,7 +227,18 @@ remove_service() {
     local service_name="$1"
     case "$INIT_SYSTEM" in
         s6)
-            s6 set disable "$service_name"
+            local s6_name
+            s6_name=$(s6_resolve_name "$service_name")
+            if command -v s6 >/dev/null 2>&1; then
+                if ! s6 set disable "$s6_name" >/dev/null 2>&1; then
+                    s6_sync_repo_once
+                    if ! s6 set disable "$s6_name" >/dev/null 2>&1; then
+                        rm -f "/etc/s6/adminsv/default/contents.d/$s6_name" 2>/dev/null || true
+                    fi
+                fi
+            else
+                rm -f "/etc/s6/adminsv/default/contents.d/$s6_name" 2>/dev/null || true
+            fi
             ;;
         openrc)
             rc-update del "$service_name" default || true
@@ -138,17 +255,19 @@ remove_service() {
     esac
 }
 
-# Sync s6 repo after package installs/removals
-sync_s6_repo() {
-    if [ "$INIT_SYSTEM" = "s6" ]; then
-        s6 repo sync
-    fi
-}
-
-# Commit and apply staged s6 set changes
 reload_s6_db() {
     if [ "$INIT_SYSTEM" = "s6" ]; then
-        s6 set commit && s6 live install
+        if command -v s6 >/dev/null 2>&1; then
+            if s6 set commit -f; then
+                if ! s6 live install --init; then
+                    echo "Warning: s6 live install --init failed; service changes were compiled but not applied to the boot database." >&2
+                fi
+            else
+                echo "Warning: s6 set commit failed; run s6 set check after boot to see what is inconsistent." >&2
+            fi
+        elif command -v s6-db-reload >/dev/null 2>&1; then
+            s6-db-reload
+        fi
     fi
 }
 
@@ -182,7 +301,6 @@ if [ "$DISTRO" = "artix" ]; then
 fi
 
 ### FIRST COMMANDS AND ULU IMPORT P1 ###
-killall xfce4-screensaver || true
 
 # INITIALIZE KEYRING (must run before any pacman/paru call that checks signatures)
 pacman-key --init
@@ -201,56 +319,97 @@ fi
 
 pacman -U --noconfirm 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst' 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst'
 pacman-key --populate chaotic
-if [ "$DISTRO" = "artix" ]; then
-cat >> /etc/pacman.conf <<'\''EOF'\''
 
-[auris]
-SigLevel = Required
-Server = https://auris.artixlinux.org/api/packages/auris/arch/$repo/$arch
-
-[chaotic-aur]
-Include = /etc/pacman.d/chaotic-mirrorlist
-EOF
-else
-cat >> /etc/pacman.conf <<'\''EOF'\''
-
-[chaotic-aur]
-Include = /etc/pacman.d/chaotic-mirrorlist
-EOF
-fi
+write_pacman_conf "$DISTRO" "" false
 pacman -Sy --noconfirm --needed paru
-paru -S --noconfirm --needed alhp-keyring alhp-mirrorlist
 
-# CPU ARCHITECTURE DETECTION
-arch_support=$(/lib/ld-linux-x86-64.so.2 --help 2>&1 | grep '\''supported'\'' | head -n 1 | awk '\''{print $1}'\'')
-if [ "$arch_support" = "x86-64-v3" ]; then
-    unzip -o "ulu-${DISTRO}-v3.zip" -d /etc
-elif [ "$arch_support" = "x86-64-v4" ]; then
-    unzip -o "ulu-${DISTRO}-v4.zip" -d /etc
+### BUILD ALHP KEYRING / MIRRORLIST ###
+
+build_user="ulu-builder"
+alhp_ok=false
+id "$build_user" >/dev/null 2>&1 || useradd -m -G wheel "$build_user"
+echo "$build_user ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/99-ulu-builder
+chmod 440 /etc/sudoers.d/99-ulu-builder
+
+if runuser -l "$build_user" -c '\''paru -S --noconfirm --needed alhp-keyring alhp-mirrorlist'\''; then
+  alhp_ok=true
+else
+  echo "Building alhp-keyring/alhp-mirrorlist failed; continuing without ALHP repos." >&2
+fi
+rm -f /etc/sudoers.d/99-ulu-builder
+userdel -r "$build_user" >/dev/null 2>&1
+
+### CPU ARCHITECTURE DETECTION & REPO CONFIGURATION ###
+
+CPU_LEVEL=$(detect_cpu_level)
+echo "Configuring pacman repos (distro: $DISTRO, CPU level: ${CPU_LEVEL:-baseline}, ALHP repos available: $alhp_ok)..."
+
+repo_label="chaotic-aur"
+[ "$DISTRO" = "artix" ] && repo_label="chaotic-aur/auris"
+
+if [ -z "$CPU_LEVEL" ]; then
+    echo "CPU is below x86-64-v3 — writing a baseline config with $repo_label but no ALHP repos." >&2
+elif [ "$alhp_ok" != "true" ]; then
+    echo "CPU supports x86-64-$CPU_LEVEL but ALHP repos failed to build — writing Architecture=x86_64 x86_64_$CPU_LEVEL with $repo_label but no ALHP repos." >&2
 fi
 
-# ACTIVATE REPOS
-find /etc/pacman.conf -type f -exec sed -i 's/#//g' {} +
+write_pacman_conf "$DISTRO" "$CPU_LEVEL" "$alhp_ok"
 
 # POPULATE & REFRESH
-pacman-key --populate alhp
+if [ "$alhp_ok" = true ]; then
+    pacman-key --populate alhp
+fi
 pacman -Syy
 
 # FIND QUICKEST MIRRORLIST
+rank_mirrors() {
+    local out ok=false
+    out=$(mktemp) || return 1
+
+    if [ "$DISTRO" = "artix" ]; then
+        rankmirrors -n 5 -m 3 /etc/pacman.d/mirrorlist > "$out" \
+            && grep -q "^Server" "$out" && ok=true
+    elif pacman -S --noconfirm --needed rate-mirrors \
+            && timeout 120 rate-mirrors --allow-root --save="$out" --protocol https arch --max-delay=43200 \
+            && grep -q "^Server" "$out"; then
+        ok=true
+    elif pacman -S --noconfirm --needed reflector \
+            && timeout 90 reflector --protocol https --age 12 --latest 100 --number 10 --sort rate \
+                   --threads 20 --connection-timeout 3 --download-timeout 3 --save "$out" \
+            && grep -q "^Server" "$out"; then
+        ok=true
+    fi
+
+    if [ "$ok" = true ] \
+        && install -m 644 "$out" /etc/pacman.d/mirrorlist.new \
+        && mv -f /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist; then
+        rm -f "$out"
+        return 0
+    fi
+    rm -f "$out" /etc/pacman.d/mirrorlist.new
+    return 1
+}
+
 (
     set +m
     echo -ne "\033[1mFinding quickest mirrorlist, please wait... 0s\033[0m"
     seconds=0
-    sh -c "rankmirrors -n 5 -m 3 /etc/pacman.d/mirrorlist > /etc/pacman.d/mirrorlist.new && mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist && chmod 644 /etc/pacman.d/mirrorlist" &>/dev/null &
+    rank_mirrors &>/tmp/ulu-mirror-rank.log &
     RANK_PID=$!
     while kill -0 $RANK_PID 2>/dev/null; do
         sleep 1
         seconds=$((seconds + 1))
         echo -ne "\r\033[1mFinding quickest mirrorlist, please wait... ${seconds}s\033[0m"
     done
+    if wait $RANK_PID; then
+        echo -e "\r\033[K\033[1mQuickest mirrorlist written (${seconds}s)\033[0m"
+    else
+        echo -e "\r\033[K\033[1mMirror ranking failed, keeping the existing mirrorlist (log: /tmp/ulu-mirror-rank.log)\033[0m"
+    fi
 )
 
 ### FIRST COMMANDS AND ULU IMPORT P2 ###
+
 pacman -S paru --noconfirm --needed
 for attempt in $(seq 1 5); do
   echo "Running full system update (attempt $attempt/5)..." >&2
@@ -290,17 +449,12 @@ careful_install \
   lib32-libdisplay-info realtime-privileges gallery-dl tesseract-data-eng \
   scx-scheds debtap fwupd chrony dnsmasq mesa lib32-mesa tk nix
 
-# INSTALL PYTHON PACKAGES
-careful_install \
-  python-dateutil python-xlib python-pyaudio python-pipenv \
-  python-matplotlib python-tqdm python-magic \
-  python-piexif python-moviepy python-brotli python-websockets python-librosa \
-  python-pypdf2 python-pytesseract
+### REMOVE COMPETING NETWORK PACKAGES ###
 
-# INSTALL XFCE PACKAGES
-if pacman -Qq | grep -q ''^thunar$''; then
-    careful_install \
-      networkmanager seahorse ffmpegthumbnailer
+if pacman -Qi networkmanager &>/dev/null; then
+    echo "NetworkManager already installed, skipping network package replacement." >&2
+else
+    careful_install networkmanager
 
     case "$INIT_SYSTEM" in
         s6)
@@ -316,8 +470,34 @@ if pacman -Qq | grep -q ''^thunar$''; then
             careful_install networkmanager-dinit
             ;;
     esac
-else
-    echo "Thunar not detected, skipping XFCE packages."
+
+    OTHER_NETWORK_PKGS=()
+    for pkg in connman connman-s6 connman-openrc connman-runit connman-dinit connman-gtk wicd netctl dhcpcd; do
+        pacman -Qi "$pkg" &>/dev/null && OTHER_NETWORK_PKGS+=("$pkg")
+    done
+    if [ "${#OTHER_NETWORK_PKGS[@]}" -gt 0 ]; then
+        echo "Removing competing network packages: ${OTHER_NETWORK_PKGS[*]}" >&2
+        for pkg in "${OTHER_NETWORK_PKGS[@]}"; do
+            case "$pkg" in
+                connman*)
+                    if [ "$INIT_SYSTEM" = "systemd" ]; then
+                        systemctl disable --now connman &>/dev/null || true
+                    else
+                        s6-rc -d change connmand || true
+                        find /etc/s6 \( -iname "*connman*" -o -iname "*connmand*" \) -print -exec rm -rf {} + || true
+                        find /etc/runit \( -iname "*connman*" -o -iname "*connmand*" \) -print -exec rm -rf {} + || true
+                        find /etc/dinit.d \( -iname "*connman*" -o -iname "*connmand*" \) -print -exec rm -rf {} + || true
+                    fi
+                    ;;
+                wicd|netctl|dhcpcd)
+                    remove_service "$pkg"
+                    ;;
+            esac
+        done
+        pacman -Rdd --noconfirm "${OTHER_NETWORK_PKGS[@]}" || true
+    else
+        echo "No competing network packages detected." >&2
+    fi
 fi
 
 # INSTALL INIT PACKAGES
@@ -420,7 +600,6 @@ fi
 
 # AMD/INTEL SELECTION
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  unzip -o ulu-dotfiles.zip -d /home/$USER/
   unzip -o ulu-root-main.zip -d /
   unzip -o ulu-root-programs.zip -d /
   add_service fail2ban
@@ -429,7 +608,6 @@ fi
 
 # LAPTOP SELECTION
 if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
-  unzip -o ulu-dotfiles.zip -d /home/$USER/
   unzip -o ulu-root-main.zip -d /
   unzip -o ulu-root-programs.zip -d /
   unzip -o ulu-root-laptop.zip -d /
@@ -438,7 +616,6 @@ fi
 
 # NVIDIA SELECTION
 if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
-  unzip -o ulu-dotfiles.zip -d /home/$USER/
   unzip -o ulu-root-main.zip -d /
   unzip -o ulu-root-programs.zip -d /
   unzip -o ulu-nvidia-patch.zip -d /
@@ -455,34 +632,11 @@ add_service dnsmasq
 add_service ufw
 add_service earlyoom
 add_service usbguard
+add_service NetworkManager
 
-if pacman -Qq | grep -q ''^thunar$''; then
-    add_service NetworkManager
-fi
-
-# REMOVE CONNMAN & REFRESH
-if pacman -Qi connman &>/dev/null || pacman -Qi connman-s6 &>/dev/null || pacman -Qi connman-openrc &>/dev/null || pacman -Qi connman-runit &>/dev/null || pacman -Qi connman-dinit &>/dev/null; then
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl disable --now connman &>/dev/null || true
-    else
-        s6-rc -d change connmand || true
-        s6 set disable connmand || true
-        find /etc/s6 \( -iname '*connman*' -o -iname '*connmand*' \) -print -exec rm -rf {} + || true
-        find /etc/runit \( -iname '*connman*' -o -iname '*connmand*' \) -print -exec rm -rf {} + || true
-        find /etc/dinit.d \( -iname '*connman*' -o -iname '*connmand*' \) -print -exec rm -rf {} + || true
-    fi
-    CONNMAN_PKGS=()
-    for pkg in connman connman-s6 connman-openrc connman-runit connman-dinit connman-gtk; do
-        pacman -Qi "$pkg" &>/dev/null && CONNMAN_PKGS+=("$pkg")
-    done
-    pacman -Rdd --noconfirm "${CONNMAN_PKGS[@]}" || true
-else
-    echo "connman not detected, skipping removal."
-fi
 # Sync repo after all package installs/removals, then commit and apply set changes
 case "$INIT_SYSTEM" in
     s6)
-        sync_s6_repo
         reload_s6_db
         ;;
     openrc)
@@ -527,6 +681,25 @@ if [ -d /etc/runlevels ]; then
   mv -f /etc/rc.local /etc/local.d/rc.start
   chmod 755 /etc/local.d/rc.start
   add_service local
+
+  # On KDE Plasma, rc.local should only run once someone has logged in through sddm into a Plasma session.
+  if pacman -Qi plasma-desktop &>/dev/null || pacman -Qi plasma-meta &>/dev/null; then
+    if ! head -1 /etc/local.d/rc.start | grep -q "^#!"; then
+      sed -i "1i #!/bin/sh" /etc/local.d/rc.start
+    fi
+    {
+      head -1 /etc/local.d/rc.start
+      echo "# Wait for an sddm-launched KDE Plasma session to actually start"
+      echo "# before running the rest of this script."
+      echo "while ! pgrep -x plasmashell >/dev/null 2>&1; do"
+      echo "  sleep 1"
+      echo "done"
+      tail -n +2 /etc/local.d/rc.start
+    } > /etc/local.d/rc.start.new
+    mv -f /etc/local.d/rc.start.new /etc/local.d/rc.start
+    chmod 755 /etc/local.d/rc.start
+    echo "KDE Plasma detected: rc.local will now wait for an sddm login before running." >&2
+  fi
 fi
 
 # systemd
@@ -589,6 +762,7 @@ elif command -v xbps-install &>/dev/null; then
 ######################
 
 ### SERVICE MANAGEMENT FUNCTIONS ###
+
 add_service() {
     local service_name="$1"
     ln -sf "/etc/sv/$service_name" /var/service/
@@ -601,6 +775,7 @@ remove_service() {
 }
 
 ### INSTALL PACKAGES ONE BY ONE WITH RETRIES ###
+
 careful_install() {
   local failed_packages=()
   for pkg in "$@"; do
@@ -643,6 +818,7 @@ echo "6. NVIDIA-PROPRIETARY-DESKTOP"
 read -p "Enter your choice (1-6): " choice
 
 ### FIRST COMMANDS AND ULU IMPORT P1 ###
+
 xbps-install -Syu 7zip unzip git xbps
 mkdir -p /home/ulu-files/
 git clone https://github.com/Michael-Sebero/ULU /home/ulu-files/
@@ -653,6 +829,7 @@ xbps-install -Sy void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree
 xbps-install -Sy
 
 ### FULL SYSTEM UPDATE WITH RETRIES ###
+
 for attempt in $(seq 1 5); do
   echo "Running full system update (attempt $attempt/5)..." >&2
   if xbps-install -Suy; then
@@ -696,20 +873,6 @@ careful_install \
 KVER=$(uname -r | cut -d. -f1-2)
 if [ -n "$KVER" ]; then
   careful_install "linux${KVER}-headers"
-fi
-
-# INSTALL PYTHON PACKAGES
-careful_install \
-  python3-dateutil python3-xlib python3-PyAudio python3-pipenv \
-  python3-matplotlib python3-tqdm python3-magic \
-  python3-piexif python3-websockets \
-
-# INSTALL XFCE PACKAGES
-if xbps-query thunar &>/dev/null; then
-    careful_install \
-      NetworkManager seahorse ffmpegthumbnailer \
-else
-    echo "Thunar not detected, skipping XFCE packages."
 fi
 
 # AMD-DESKTOP CHOICE
@@ -778,7 +941,6 @@ fi
 
 # AMD/INTEL SELECTION
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  unzip -o ulu-dotfiles.zip -d /home/$USER/
   unzip -o ulu-root-main.zip -d /
   unzip -o ulu-root-programs.zip -d /
   add_service fail2ban
@@ -787,7 +949,6 @@ fi
 
 # LAPTOP SELECTION
 if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
-  unzip -o ulu-dotfiles.zip -d /home/$USER/
   unzip -o ulu-root-main.zip -d /
   unzip -o ulu-root-programs.zip -d /
   unzip -o ulu-root-laptop.zip -d /
@@ -796,7 +957,6 @@ fi
 
 # NVIDIA SELECTION
 if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
-  unzip -o ulu-dotfiles.zip -d /home/$USER/
   unzip -o ulu-root-main.zip -d /
   unzip -o ulu-root-programs.zip -d /
   unzip -o ulu-nvidia-patch.zip -d /
@@ -814,19 +974,40 @@ add_service ufw
 add_service earlyoom
 add_service usbguard
 
-if xbps-query thunar &>/dev/null; then
-    add_service NetworkManager
+### REMOVE COMPETING NETWORK PACKAGES ###
+
+if xbps-query NetworkManager &>/dev/null; then
+    echo "NetworkManager already installed, skipping network package replacement." >&2
+else
+    careful_install NetworkManager
+
+    # Remove other network management packages now that NetworkManager is in place.
+    # Add any additional competing packages to this list as needed.
+    OTHER_NETWORK_PKGS=()
+    for pkg in connman connman-gtk wicd dhcpcd; do
+        xbps-query "$pkg" &>/dev/null && OTHER_NETWORK_PKGS+=("$pkg")
+    done
+    if [ "${#OTHER_NETWORK_PKGS[@]}" -gt 0 ]; then
+        echo "Removing competing network packages: ${OTHER_NETWORK_PKGS[*]}" >&2
+        for pkg in "${OTHER_NETWORK_PKGS[@]}"; do
+            case "$pkg" in
+                connman*)
+                    sv down connmand &>/dev/null || true
+                    rm -f /var/service/connmand
+                    find /etc/sv -maxdepth 1 -iname "*connman*" -print -exec rm -rf {} + || true
+                    ;;
+                wicd|dhcpcd)
+                    remove_service "$pkg"
+                    ;;
+            esac
+        done
+        xbps-remove -y "${OTHER_NETWORK_PKGS[@]}" || true
+    else
+        echo "No competing network packages detected." >&2
+    fi
 fi
 
-# REMOVE CONNMAN & REFRESH
-if xbps-query connman &>/dev/null; then
-    sv down connmand &>/dev/null || true
-    rm -f /var/service/connmand
-    find /etc/sv -maxdepth 1 -iname "*connman*" -print -exec rm -rf {} + || true
-    xbps-remove -y connman connman-gtk || true
-else
-    echo "connman not detected, skipping removal."
-fi
+add_service NetworkManager
 
 grub-mkconfig -o /boot/grub/grub.cfg
 
@@ -870,16 +1051,18 @@ else
 ###############################
 
 ### PACKAGE MANAGER / DISTRO DETECTION ###
+
 if ! command -v apt-get &>/dev/null; then
     echo "Unsupported distribution. This section supports Linux Mint and Ubuntu." >&2
     exit 1
 fi
 
 ### INIT SYSTEM ###
-# Linux Mint and Ubuntu both ship systemd.
+
 INIT_SYSTEM="systemd"
 
 ### SERVICE MANAGEMENT FUNCTIONS ###
+
 add_service() {
     local service_name="$1"
     systemctl enable "$service_name" &>/dev/null || true
@@ -891,6 +1074,7 @@ remove_service() {
 }
 
 ### PACKAGE NAME MAPPING ###
+
 map_package_names() {
     local base_pkg="$1"
     case "$base_pkg" in
@@ -946,7 +1130,6 @@ map_package_names() {
         networkmanager) echo "network-manager" ;;
         seahorse) echo "seahorse" ;;
         ffmpegthumbnailer) echo "ffmpegthumbnailer" ;;
-        libva-utils) echo "libva-utils" ;;
         clamav) echo "clamav clamav-daemon" ;;
         earlyoom) echo "earlyoom" ;;
         fail2ban) echo "fail2ban" ;;
@@ -958,25 +1141,12 @@ map_package_names() {
         brightnessctl) echo "brightnessctl" ;;
         vulkan-driver) echo "mesa-vulkan-drivers" ;;
         lib32-vulkan-driver) echo "mesa-vulkan-drivers:i386" ;;
-        python-dateutil) echo "python3-dateutil" ;;
-        python-xlib) echo "python3-xlib" ;;
-        python-pyaudio) echo "python3-pyaudio" ;;
-        python-pipenv) echo "pipenv" ;;
-        python-matplotlib) echo "python3-matplotlib" ;;
-        python-tqdm) echo "python3-tqdm" ;;
-        python-magic) echo "python3-magic" ;;
-        python-piexif) echo "python3-piexif" ;;
-        python-moviepy) echo "" ;;
-        python-brotli) echo "python3-brotli" ;;
-        python-websockets) echo "python3-websockets" ;;
-        python-librosa) echo "" ;;
-        python-pypdf2) echo "python3-pypdf2" ;;
-        python-pytesseract) echo "python3-pytesseract" ;;
         *) echo "$base_pkg" ;;
     esac
 }
 
-### INSTALL PACKAGES ONE BY ONE WITH RETRIES (already-correct distro package names) ###
+### INSTALL PACKAGES ONE BY ONE WITH RETRIES ###
+
 careful_install_raw() {
     local failed_packages=()
     for pkg in "$@"; do
@@ -1007,6 +1177,7 @@ careful_install_raw() {
 }
 
 ### INSTALL PACKAGES ONE BY ONE WITH RETRIES (canonical Artix/Void-style names) ###
+
 careful_install() {
     local mapped_all=()
     for base_pkg in "$@"; do
@@ -1034,6 +1205,7 @@ echo "6. NVIDIA-PROPRIETARY-DESKTOP"
 read -p "Enter your choice (1-6): " choice
 
 ### INITIAL SETUP & PREREQUISITE TOOLS ###
+
 echo -e "\e[1mUpdating package lists...\e[0m"
 export DEBIAN_FRONTEND=noninteractive
 dpkg --add-architecture i386
@@ -1041,6 +1213,7 @@ apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg wget git unzip p7zip-full software-properties-common apt-transport-https
 
 ### ENABLE ADDITIONAL REPOSITORIES ###
+
 echo -e "\e[1mEnabling additional repositories...\e[0m"
 if command -v add-apt-repository &>/dev/null; then
     add-apt-repository -y universe 2>/dev/null || true
@@ -1049,11 +1222,13 @@ fi
 apt-get update
 
 ### FIRST COMMANDS AND ULU IMPORT P1 ###
+
 mkdir -p /home/ulu-files/
 git clone https://github.com/Michael-Sebero/ULU /home/ulu-files/
 cd /home/ulu-files/files/ulu-packages/
 
 ### FULL SYSTEM UPDATE WITH RETRIES ###
+
 for attempt in $(seq 1 5); do
     echo "Running full system update (attempt $attempt/5)..." >&2
     if DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade; then
@@ -1072,13 +1247,43 @@ done
 mv /home/ulu-files/files/ulu-manual/Manual /home/$USER/Desktop/
 
 ### REMOVE CONFLICTING PACKAGES ###
+
 for pkg in pulseaudio pulseaudio-module-bluetooth modemmanager; do
     if dpkg -s "$pkg" &>/dev/null; then
         apt-get purge -y "$pkg" || true
     fi
 done
 
+### ENSURE NETWORKMANAGER (REMOVE COMPETING NETWORK PACKAGES) ###
+
+if dpkg -s network-manager &>/dev/null; then
+    echo "NetworkManager already installed, skipping network package replacement." >&2
+else
+    careful_install networkmanager
+
+    # Remove other network management packages now that NetworkManager is in place.
+    # Add any additional competing packages to this list as needed.
+    OTHER_NETWORK_PKGS=()
+    for pkg in connman connman-gtk wicd; do
+        dpkg -s "$pkg" &>/dev/null && OTHER_NETWORK_PKGS+=("$pkg")
+    done
+    if [ "${#OTHER_NETWORK_PKGS[@]}" -gt 0 ]; then
+        echo "Removing competing network packages: ${OTHER_NETWORK_PKGS[*]}" >&2
+        for pkg in "${OTHER_NETWORK_PKGS[@]}"; do
+            case "$pkg" in
+                connman*) systemctl disable --now connman &>/dev/null || true ;;
+                wicd) systemctl disable --now wicd &>/dev/null || true ;;
+            esac
+        done
+        apt-get purge -y "${OTHER_NETWORK_PKGS[@]}" || true
+    else
+        echo "No competing network packages detected." >&2
+    fi
+fi
+add_service NetworkManager
+
 ### INSTALL BASE PACKAGES ###
+
 careful_install \
   unrar flatpak gamemode lib32-gamemode dnscrypt-proxy apparmor \
   clamav gufw macchanger wine wine-mono winetricks steam lynis rkhunter opendoas \
@@ -1089,14 +1294,14 @@ careful_install \
   fwupd chrony dnsmasq mesa lib32-mesa tk
 
 ### INSTALL NIX PACKAGE MANAGER ###
-# No native package on this distro family; the official multi-user
-# installer works the same regardless.
+
 if ! command -v nix &>/dev/null; then
     echo -e "\e[1mInstalling the Nix package manager...\e[0m"
     sh <(curl -L https://nixos.org/nix/install) --daemon --yes || echo "Nix installation failed, skipping." >&2
 fi
 
 ### INSTALL SCX-SCHEDS (kernel 6.12+ only) ###
+
 check_kernel_version() {
     local kernel_version
     kernel_version=$(uname -r | cut -d. -f1,2)
@@ -1116,30 +1321,8 @@ else
     echo "Kernel is below 6.12, skipping scx-scheds installation." >&2
 fi
 
-### INSTALL PYTHON PACKAGES ###
-careful_install \
-  python-dateutil python-xlib python-pyaudio python-pipenv \
-  python-matplotlib python-tqdm python-magic \
-  python-piexif python-moviepy python-brotli python-websockets python-librosa \
-  python-pypdf2 python-pytesseract
-
-### INSTALL XFCE PACKAGES ###
-if command -v thunar &>/dev/null; then
-    careful_install \
-      networkmanager seahorse ffmpegthumbnailer
-    add_service NetworkManager
-else
-    echo "Thunar not detected, skipping XFCE packages."
-fi
-
-### CPU MICROARCHITECTURE DETECTION (used for the XanMod kernel) ###
-arch_support=$(/lib/ld-linux-x86-64.so.2 --help 2>&1 | grep supported | head -n 1 | awk "{print \$1}")
-XANMOD_SUFFIX="x64v3"
-if [ "$arch_support" = "x86-64-v4" ]; then
-    XANMOD_SUFFIX="x64v4"
-fi
-
 ### XANMOD KERNEL HELPER ###
+
 setup_xanmod_repo() {
     if [ -f /etc/apt/sources.list.d/xanmod-release.list ]; then
         return 0
@@ -1154,11 +1337,11 @@ setup_xanmod_repo() {
 install_xanmod_kernel() {
     local flavor="$1"
     setup_xanmod_repo
-    local kernel_pkg="linux-xanmod-${XANMOD_SUFFIX}"
+    local kernel_pkg="linux-xanmod-x64v3"
     if [ -n "$flavor" ]; then
-        kernel_pkg="linux-xanmod-${flavor}-${XANMOD_SUFFIX}"
+        kernel_pkg="linux-xanmod-${flavor}-x64v3"
     fi
-    careful_install_raw "$kernel_pkg" || careful_install_raw "linux-xanmod-${XANMOD_SUFFIX}" || careful_install_raw linux-xanmod
+    careful_install_raw "$kernel_pkg" || careful_install_raw "linux-xanmod-x64v3" || careful_install_raw linux-xanmod
 }
 
 # AMD-DESKTOP CHOICE
@@ -1182,8 +1365,6 @@ if [ "$choice" = "3" ]; then
         apt-get purge -y xfce4-power-manager xfce4-battery-plugin || true
     fi
     install_xanmod_kernel edge
-    # Mesa Vulkan driver package covers both AMD and Intel on this distro
-    # family, unlike the Arch split vulkan-radeon/vulkan-intel packages.
     careful_install vulkan-driver lib32-vulkan-driver libva-utils fail2ban cpupower
 fi
 
@@ -1226,6 +1407,7 @@ if [ "$choice" = "6" ]; then
 fi
 
 ### IMPORT FLATHUB + FLATPAK BETA REPOS ###
+
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo
 
@@ -1233,7 +1415,6 @@ flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/fl
 
 # AMD/INTEL SELECTION
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-    unzip -o ulu-dotfiles.zip -d /home/$USER/
     unzip -o ulu-root-main.zip -d /
     unzip -o ulu-root-programs.zip -d /
     add_service fail2ban
@@ -1242,7 +1423,6 @@ fi
 
 # LAPTOP SELECTION
 if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
-    unzip -o ulu-dotfiles.zip -d /home/$USER/
     unzip -o ulu-root-main.zip -d /
     unzip -o ulu-root-programs.zip -d /
     unzip -o ulu-root-laptop.zip -d /
@@ -1251,7 +1431,6 @@ fi
 
 # NVIDIA SELECTION
 if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
-    unzip -o ulu-dotfiles.zip -d /home/$USER/
     unzip -o ulu-root-main.zip -d /
     unzip -o ulu-root-programs.zip -d /
     unzip -o ulu-nvidia-patch.zip -d /
@@ -1260,32 +1439,18 @@ if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
 fi
 
 ### ADAPT ULU NETWORKMANAGER/DNSMASQ/DNSCRYPT-PROXY CONFIGS FOR APT ###
-# ulu-root-main.zip ships one dnscrypt-proxy.toml, dnsmasq.conf and
-# NetworkManager.conf for every distro ULU supports. None of that content
-# is actually Arch-specific (dnscrypt-proxy already listens on 5300 so it
-# does not fight avahi for 5353, and dnsmasq/NetworkManager.conf use plain
-# upstream options), so keep the shipped files and only patch the couple
-# of settings that do not hold on an apt/systemd system.
+
 echo -e "\e[1mAdapting dnscrypt-proxy/dnsmasq/NetworkManager configs for apt...\e[0m"
 
-# Make sure resolv.conf lands as a real file rather than being written
-# through a pre-existing systemd-resolved symlink.
 if [ -L /etc/resolv.conf ]; then
     rm -f /etc/resolv.conf
     unzip -o ulu-root-main.zip etc/resolv.conf -d /
 fi
 
-# Ubuntu/Mint do not ship isc-dhcp-client by default, so the shipped
-# "dhcp=dhclient" would leave NetworkManager without a usable DHCP
-# backend. Point it at the built-in client instead.
 if [ -f /etc/NetworkManager/NetworkManager.conf ]; then
     sed -i "s/^dhcp=dhclient$/dhcp=internal/" /etc/NetworkManager/NetworkManager.conf
 fi
 
-# The shipped dnscrypt-proxy.toml targets the 2.1+ schema. Older apt
-# releases can still carry dnscrypt-proxy 2.0.x, which only understands
-# the previous keys, so patch those in place when that is what apt
-# installed instead of overwriting the rest of the file.
 if command -v dnscrypt-proxy &>/dev/null && [ -f /etc/dnscrypt-proxy/dnscrypt-proxy.toml ]; then
     DNSCRYPT_VERSION=$(dnscrypt-proxy -version 2>&1 | grep -oP "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
     MAJOR_VERSION=$(echo "$DNSCRYPT_VERSION" | cut -d. -f1)
@@ -1297,14 +1462,9 @@ if command -v dnscrypt-proxy &>/dev/null && [ -f /etc/dnscrypt-proxy/dnscrypt-pr
     fi
 fi
 
-# systemd-resolved otherwise fights dnsmasq for DNS duty on port 53 and
-# keeps regenerating its own resolv.conf symlink.
 systemctl disable --now systemd-resolved 2>/dev/null || true
 systemctl mask systemd-resolved 2>/dev/null || true
 
-# Bring the stack up in dependency order: dnscrypt-proxy first (dnsmasq
-# forwards to it on 127.0.0.1:5300), then dnsmasq, then reload
-# NetworkManager so it picks up dns=none from the config above.
 systemctl enable dnscrypt-proxy 2>/dev/null || true
 systemctl restart dnscrypt-proxy 2>/dev/null || true
 sleep 3
@@ -1318,6 +1478,7 @@ fi
 echo "DNS configuration complete."
 
 ### INSTALL UNIVERSAL RC.LOCAL ###
+
 RC_LOCAL_PATH="/etc/rc.local"
 
 if [ -f "$RC_LOCAL_PATH" ]; then
@@ -1369,16 +1530,6 @@ add_service earlyoom
 add_service usbguard
 if command -v ufw &>/dev/null; then
     add_service ufw
-fi
-
-# REMOVE CONNMAN & REFRESH
-CONNMAN_INSTALLED=false
-dpkg -s connman &>/dev/null && CONNMAN_INSTALLED=true
-if [ "$CONNMAN_INSTALLED" = true ]; then
-    systemctl disable --now connman 2>/dev/null || true
-    apt-get purge -y connman connman-gtk || true
-else
-    echo "connman not detected, skipping removal."
 fi
 
 update-grub 2>/dev/null || true
