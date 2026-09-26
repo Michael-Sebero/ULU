@@ -1313,10 +1313,11 @@ fi
 
 ### FORCE-LOAD GPU KMS MODULE INTO BOOSTER (host-mode autodetection misses it in a chroot) ###
 
+vm_modules="virtio_gpu,bochs,qxl,cirrus,vmwgfx,vboxvideo,hyperv_drm"
 case "$choice" in
-    1|2) echo "modules_force_load: amdgpu" >> /etc/booster.yaml ;;
-    3|4) echo "modules_force_load: i915" >> /etc/booster.yaml ;;
-    5|6) echo "modules_force_load: nvidia,nvidia_modeset,nvidia_uvm,nvidia_drm" >> /etc/booster.yaml ;;
+    1|2) echo "modules_force_load: amdgpu,$vm_modules" >> /etc/booster.yaml ;;
+    3|4) echo "modules_force_load: i915,$vm_modules" >> /etc/booster.yaml ;;
+    5|6) echo "modules_force_load: nvidia,nvidia_modeset,nvidia_uvm,nvidia_drm,$vm_modules" >> /etc/booster.yaml ;;
 esac
 
 ### SWITCH INITRAMFS GENERATION FROM DRACUT TO BOOSTER ###
