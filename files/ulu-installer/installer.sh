@@ -1325,9 +1325,6 @@ for k in "${VMLINUZ_FILES[@]}"; do
 done
 shopt -u nullglob
 
-# Only trust booster and drop dracut once EVERY installed kernel actually has
-# a matching booster image - a partial regenerate_images failure must not
-# strip the fallback generator out from under a kernel that still needs it.
 if [ "${#VMLINUZ_FILES[@]}" -gt 0 ] && [ "${#MISSING_BOOSTER[@]}" -eq 0 ]; then
     for img in /boot/booster-*.img; do
         base=$(basename "$img")
