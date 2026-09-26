@@ -218,7 +218,7 @@ cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
         printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
         [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/EFI/limine/amd-ucode.img"
         [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/EFI/limine/intel-ucode.img"
-        echo "    module_path: boot():/EFI/limine/booster-\$suf.img"
+        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/EFI/limine/booster-\$suf.img"
     done
 } > "$ldir/limine.conf"
 SYNC
@@ -311,7 +311,7 @@ cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
         printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
         [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/limine/amd-ucode.img"
         [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/limine/intel-ucode.img"
-        echo "    module_path: boot():/limine/booster-\$suf.img"
+        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/limine/booster-\$suf.img"
     done
 } > "$ldir/limine.conf"
 SYNC
@@ -1062,7 +1062,7 @@ cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
         printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
         [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/EFI/limine/amd-ucode.img"
         [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/EFI/limine/intel-ucode.img"
-        echo "    module_path: boot():/EFI/limine/booster-\$suf.img"
+        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/EFI/limine/booster-\$suf.img"
     done
 } > "$ldir/limine.conf"
 SYNC
@@ -1155,7 +1155,7 @@ cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
         printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
         [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/limine/amd-ucode.img"
         [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/limine/intel-ucode.img"
-        echo "    module_path: boot():/limine/booster-\$suf.img"
+        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/limine/booster-\$suf.img"
     done
 } > "$ldir/limine.conf"
 SYNC
