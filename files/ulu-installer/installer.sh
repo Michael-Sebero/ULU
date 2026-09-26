@@ -208,19 +208,60 @@ shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$ldir/BOOTX64.EFI"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$esp/EFI/BOOT/BOOTX64.EFI"
-cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
-[ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
-[ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
+booster_for() {
+    local y
+    y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
+    grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
+}
+stage() {
+    cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
+    keep+="\${1##*/} "
+}
+n=0
+skipped=""
+keep=" "
 {
     echo "timeout: $limine_timeout"
-    for k in /boot/vmlinuz-*; do
-        suf="\${k##*/vmlinuz-}"
-        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
-        [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/EFI/limine/amd-ucode.img"
-        [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/EFI/limine/intel-ucode.img"
-        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/EFI/limine/booster-\$suf.img"
-    done
-} > "$ldir/limine.conf"
+    while read -r m; do
+        [ -f "\$m" ] || continue
+        read -r p < "\$m" || [ -n "\$p" ]
+        v="\${m%/pkgbase}"; v="\${v##*/}"
+        k="/boot/vmlinuz-\$p"; i="/boot/booster-\$p.img"; label="\$p"
+        [ -f "\$k" ] || continue
+        if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
+            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+        fi
+        if ! booster_for "\$i" "\$v"; then
+            skipped+=" \$label"
+            continue
+        fi
+        stage "\$k"
+        stage "\$i"
+        n=\$((n + 1))
+        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/%s\n    cmdline: %s\n" "\$label" "\${k##*/}" "$cmdline"
+        for u in amd-ucode.img intel-ucode.img; do
+            if [ -f "/boot/\$u" ]; then
+                stage "/boot/\$u"
+                echo "    module_path: boot():/EFI/limine/\$u"
+            fi
+        done
+        echo "    module_path: boot():/EFI/limine/\${i##*/}"
+    done < <(printf "%s\n" /usr/lib/modules/*/pkgbase | sort -rV)
+} > "$ldir/limine.conf.new"
+if [ "\$n" -eq 0 ]; then
+    rm -f "$ldir/limine.conf.new"
+    echo "limine-sync: FAIL: no kernel has a booster initramfs built for it; $ldir/limine.conf left unchanged" >&2
+    exit 1
+fi
+mv -f "$ldir/limine.conf.new" "$ldir/limine.conf"
+for f in "$ldir"/vmlinuz-* "$ldir"/booster-*.img "$ldir"/*-ucode.img; do
+    case "\$keep" in *" \${f##*/} "*) ;; *) rm -f "\$f" ;; esac
+done
+if [ -n "\$skipped" ]; then
+    echo "limine-sync: FAIL: no booster initramfs for:\$skipped (left out of $ldir/limine.conf; \$n entries written)" >&2
+else
+    echo "limine-sync: PASS: \$n Limine entries, each with a booster initramfs built for its kernel"
+fi
 SYNC
         chmod +x /usr/local/bin/limine-sync
         if ! /usr/local/bin/limine-sync; then
@@ -301,22 +342,66 @@ set -euo pipefail
 shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm644 /usr/share/limine/limine-bios.sys "$ldir/limine-bios.sys"
-cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
-[ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
-[ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
+booster_for() {
+    local y
+    y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
+    grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
+}
+stage() {
+    cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
+    keep+="\${1##*/} "
+}
+n=0
+skipped=""
+keep=" "
 {
     echo "timeout: $limine_timeout"
-    for k in /boot/vmlinuz-*; do
-        suf="\${k##*/vmlinuz-}"
-        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
-        [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/limine/amd-ucode.img"
-        [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/limine/intel-ucode.img"
-        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/limine/booster-\$suf.img"
-    done
-} > "$ldir/limine.conf"
+    while read -r m; do
+        [ -f "\$m" ] || continue
+        read -r p < "\$m" || [ -n "\$p" ]
+        v="\${m%/pkgbase}"; v="\${v##*/}"
+        k="/boot/vmlinuz-\$p"; i="/boot/booster-\$p.img"; label="\$p"
+        [ -f "\$k" ] || continue
+        if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
+            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+        fi
+        if ! booster_for "\$i" "\$v"; then
+            skipped+=" \$label"
+            continue
+        fi
+        stage "\$k"
+        stage "\$i"
+        n=\$((n + 1))
+        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/%s\n    cmdline: %s\n" "\$label" "\${k##*/}" "$cmdline"
+        for u in amd-ucode.img intel-ucode.img; do
+            if [ -f "/boot/\$u" ]; then
+                stage "/boot/\$u"
+                echo "    module_path: boot():/limine/\$u"
+            fi
+        done
+        echo "    module_path: boot():/limine/\${i##*/}"
+    done < <(printf "%s\n" /usr/lib/modules/*/pkgbase | sort -rV)
+} > "$ldir/limine.conf.new"
+if [ "\$n" -eq 0 ]; then
+    rm -f "$ldir/limine.conf.new"
+    echo "limine-sync: FAIL: no kernel has a booster initramfs built for it; $ldir/limine.conf left unchanged" >&2
+    exit 1
+fi
+mv -f "$ldir/limine.conf.new" "$ldir/limine.conf"
+for f in "$ldir"/vmlinuz-* "$ldir"/booster-*.img "$ldir"/*-ucode.img; do
+    case "\$keep" in *" \${f##*/} "*) ;; *) rm -f "\$f" ;; esac
+done
+if [ -n "\$skipped" ]; then
+    echo "limine-sync: FAIL: no booster initramfs for:\$skipped (left out of $ldir/limine.conf; \$n entries written)" >&2
+else
+    echo "limine-sync: PASS: \$n Limine entries, each with a booster initramfs built for its kernel"
+fi
 SYNC
         chmod +x /usr/local/bin/limine-sync
-        /usr/local/bin/limine-sync
+        if ! /usr/local/bin/limine-sync; then
+            echo "Warning: limine-sync found no kernel with a booster initramfs. Skipping limine bios-install; GRUB stays in the MBR." >&2
+            return 1
+        fi
 
         local pttype biospart="" ptype biospartnum
         pttype=$(blkid -p -o value -s PTTYPE "$disk" 2>/dev/null)
@@ -785,14 +870,34 @@ fi
 
 ### SWITCH INITRAMFS GENERATION FROM MKINITCPIO TO BOOSTER ###
 
-/usr/lib/booster/regenerate_images 2>/dev/null || true
+BOOSTER_ROOTFS=$(findmnt -no FSTYPE /)
+case "$BOOSTER_ROOTFS" in
+    ext2|ext3|ext4|f2fs)
+        if command -v fsck &>/dev/null && command -v "fsck.$BOOSTER_ROOTFS" &>/dev/null && ! grep -q "^extra_files:" /etc/booster.yaml 2>/dev/null; then
+            echo "extra_files: fsck,fsck.$BOOSTER_ROOTFS" >> /etc/booster.yaml
+        fi
+        ;;
+esac
 
 shopt -s nullglob
-BOOSTER_IMAGES=(/boot/booster-*.img)
+KERNELS=0
+MISSING_BOOSTER=()
+for m in /usr/lib/modules/*/pkgbase; do
+    pacman -Qqo "$m" &>/dev/null || continue
+    read -r p < "$m"
+    v="${m%/pkgbase}"; v="${v##*/}"
+    KERNELS=$((KERNELS + 1))
+    if install -Dm644 "${m%/pkgbase}/vmlinuz" "/boot/vmlinuz-$p" && (umask 0077; booster build --force --kernel-version "$v" "/boot/booster-$p.img.new"); then
+        mv -f "/boot/booster-$p.img.new" "/boot/booster-$p.img"
+    else
+        rm -f "/boot/booster-$p.img.new"
+        MISSING_BOOSTER+=("$p")
+    fi
+done
 shopt -u nullglob
 
-if [ "${#BOOSTER_IMAGES[@]}" -gt 0 ]; then
-    for img in "${BOOSTER_IMAGES[@]}"; do
+if [ "$KERNELS" -gt 0 ] && [ "${#MISSING_BOOSTER[@]}" -eq 0 ]; then
+    for img in /boot/booster-*.img; do
         base=$(basename "$img")
         ln -sf "$base" "/boot/${base/booster-/initramfs-}"
     done
@@ -801,7 +906,7 @@ if [ "${#BOOSTER_IMAGES[@]}" -gt 0 ]; then
         paru -Rdd --noconfirm mkinitcpio
     fi
 else
-    echo "Warning: no Booster images found in /boot, leaving mkinitcpio in place and skipping the GRUB alias." >&2
+    echo "Warning: booster build failed for kernel(s): ${MISSING_BOOSTER[*]:-none found in /usr/lib/modules}. Leaving mkinitcpio in place; Limine will leave these kernels out." >&2
 fi
 
 # IMPORT FLATPAK BETA REPO
@@ -1052,22 +1157,58 @@ shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$ldir/BOOTX64.EFI"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$esp/EFI/BOOT/BOOTX64.EFI"
-cp -u /boot/vmlinuz-* /boot/initramfs-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
-for f in "$ldir"/vmlinuz-* "$ldir"/initramfs-*.img; do
-    [ -e "/boot/\${f##*/}" ] || rm -f "\$f"
-done
-[ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
-[ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
+booster_for() {
+    local y
+    y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
+    grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
+}
+stage() {
+    cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
+    keep+="\${1##*/} "
+}
+n=0
+skipped=""
+keep=" "
 {
     echo "timeout: $limine_timeout"
-    for k in /boot/vmlinuz-*; do
-        suf="\${k##*/vmlinuz-}"
-        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
-        [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/EFI/limine/amd-ucode.img"
-        [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/EFI/limine/intel-ucode.img"
-        [ -f "$ldir/initramfs-\$suf.img" ] && echo "    module_path: boot():/EFI/limine/initramfs-\$suf.img"
-    done
-} > "$ldir/limine.conf"
+    while read -r v; do
+        [ -n "\$v" ] || continue
+        k="/boot/vmlinuz-\$v"; i="/boot/initramfs-\$v.img"; label="\$v"
+        [ -f "\$k" ] || continue
+        if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
+            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+        fi
+        if ! booster_for "\$i" "\$v"; then
+            skipped+=" \$label"
+            continue
+        fi
+        stage "\$k"
+        stage "\$i"
+        n=\$((n + 1))
+        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/%s\n    cmdline: %s\n" "\$label" "\${k##*/}" "$cmdline"
+        for u in amd-ucode.img intel-ucode.img; do
+            if [ -f "/boot/\$u" ]; then
+                stage "/boot/\$u"
+                echo "    module_path: boot():/EFI/limine/\$u"
+            fi
+        done
+        echo "    module_path: boot():/EFI/limine/\${i##*/}"
+    done < <(for f in /boot/vmlinuz-*; do echo "\${f##*/vmlinuz-}"; done | sort -rV)
+} > "$ldir/limine.conf.new"
+if [ "\$n" -eq 0 ]; then
+    rm -f "$ldir/limine.conf.new"
+    echo "limine-sync: FAIL: no kernel has a booster initramfs built for it; $ldir/limine.conf left unchanged" >&2
+    exit 1
+fi
+mv -f "$ldir/limine.conf.new" "$ldir/limine.conf"
+for f in "$ldir"/vmlinuz-* "$ldir"/initramfs-*.img "$ldir"/*-ucode.img; do
+    case "\$keep" in *" \${f##*/} "*) ;; *) rm -f "\$f" ;; esac
+done
+if [ -n "\$skipped" ]; then
+    echo "limine-sync: FAIL: no booster initramfs for:\$skipped (left out of $ldir/limine.conf; \$n entries written)" >&2
+else
+    echo "limine-sync: PASS: \$n Limine entries, each with a booster initramfs built for its kernel"
+fi
 SYNC
         chmod +x /usr/local/bin/limine-sync
         if ! /usr/local/bin/limine-sync; then
@@ -1077,11 +1218,6 @@ SYNC
 
         if [ ! -f "$ldir/BOOTX64.EFI" ] || [ ! -f "$esp/EFI/BOOT/BOOTX64.EFI" ] || [ ! -s "$ldir/limine.conf" ]; then
             echo "Warning: limine-sync ran but BOOTX64.EFI and/or limine.conf are missing under $esp. Skipping NVRAM entry; GRUB remains the sole bootloader." >&2
-            return 1
-        fi
-
-        if [ "$(grep -c "^/Linux" "$ldir/limine.conf")" -ne "$(grep -c "module_path: .*/initramfs-" "$ldir/limine.conf")" ]; then
-            echo "Warning: a Limine entry in $ldir/limine.conf has no initramfs and would panic on root=UUID. Skipping Limine; GRUB remains the sole bootloader." >&2
             return 1
         fi
 
@@ -1153,28 +1289,62 @@ set -euo pipefail
 shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm644 /usr/share/limine/limine-bios.sys "$ldir/limine-bios.sys"
-cp -u /boot/vmlinuz-* /boot/initramfs-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
-for f in "$ldir"/vmlinuz-* "$ldir"/initramfs-*.img; do
-    [ -e "/boot/\${f##*/}" ] || rm -f "\$f"
-done
-[ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
-[ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
+booster_for() {
+    local y
+    y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
+    grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
+}
+stage() {
+    cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
+    keep+="\${1##*/} "
+}
+n=0
+skipped=""
+keep=" "
 {
     echo "timeout: $limine_timeout"
-    for k in /boot/vmlinuz-*; do
-        suf="\${k##*/vmlinuz-}"
-        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
-        [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/limine/amd-ucode.img"
-        [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/limine/intel-ucode.img"
-        [ -f "$ldir/initramfs-\$suf.img" ] && echo "    module_path: boot():/limine/initramfs-\$suf.img"
-    done
-} > "$ldir/limine.conf"
+    while read -r v; do
+        [ -n "\$v" ] || continue
+        k="/boot/vmlinuz-\$v"; i="/boot/initramfs-\$v.img"; label="\$v"
+        [ -f "\$k" ] || continue
+        if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
+            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+        fi
+        if ! booster_for "\$i" "\$v"; then
+            skipped+=" \$label"
+            continue
+        fi
+        stage "\$k"
+        stage "\$i"
+        n=\$((n + 1))
+        printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/%s\n    cmdline: %s\n" "\$label" "\${k##*/}" "$cmdline"
+        for u in amd-ucode.img intel-ucode.img; do
+            if [ -f "/boot/\$u" ]; then
+                stage "/boot/\$u"
+                echo "    module_path: boot():/limine/\$u"
+            fi
+        done
+        echo "    module_path: boot():/limine/\${i##*/}"
+    done < <(for f in /boot/vmlinuz-*; do echo "\${f##*/vmlinuz-}"; done | sort -rV)
+} > "$ldir/limine.conf.new"
+if [ "\$n" -eq 0 ]; then
+    rm -f "$ldir/limine.conf.new"
+    echo "limine-sync: FAIL: no kernel has a booster initramfs built for it; $ldir/limine.conf left unchanged" >&2
+    exit 1
+fi
+mv -f "$ldir/limine.conf.new" "$ldir/limine.conf"
+for f in "$ldir"/vmlinuz-* "$ldir"/initramfs-*.img "$ldir"/*-ucode.img; do
+    case "\$keep" in *" \${f##*/} "*) ;; *) rm -f "\$f" ;; esac
+done
+if [ -n "\$skipped" ]; then
+    echo "limine-sync: FAIL: no booster initramfs for:\$skipped (left out of $ldir/limine.conf; \$n entries written)" >&2
+else
+    echo "limine-sync: PASS: \$n Limine entries, each with a booster initramfs built for its kernel"
+fi
 SYNC
         chmod +x /usr/local/bin/limine-sync
-        /usr/local/bin/limine-sync
-
-        if [ "$(grep -c "^/Linux" "$ldir/limine.conf")" -ne "$(grep -c "module_path: .*/initramfs-" "$ldir/limine.conf")" ]; then
-            echo "Warning: a Limine entry in $ldir/limine.conf has no initramfs and would panic on root=UUID. Skipping Limine; GRUB remains the sole bootloader." >&2
+        if ! /usr/local/bin/limine-sync; then
+            echo "Warning: limine-sync found no kernel with a booster initramfs. Skipping limine bios-install; GRUB stays in the MBR." >&2
             return 1
         fi
 
@@ -1341,6 +1511,15 @@ esac
 # The Void booster package ships no regenerate_images; its kernel hook writes /boot/initramfs-<version>.img
 xbps-alternatives -s booster || echo "Warning: xbps-alternatives -s booster failed; dracut kernel hooks may remain active for future kernel updates." >&2
 
+BOOSTER_ROOTFS=$(findmnt -no FSTYPE /)
+case "$BOOSTER_ROOTFS" in
+    ext2|ext3|ext4|f2fs)
+        if command -v fsck &>/dev/null && command -v "fsck.$BOOSTER_ROOTFS" &>/dev/null && ! grep -q "^extra_files:" /etc/booster.yaml 2>/dev/null; then
+            echo "extra_files: fsck,fsck.$BOOSTER_ROOTFS" >> /etc/booster.yaml
+        fi
+        ;;
+esac
+
 shopt -s nullglob
 VMLINUZ_FILES=(/boot/vmlinuz-*)
 MISSING_BOOSTER=()
@@ -1355,12 +1534,8 @@ for k in "${VMLINUZ_FILES[@]}"; do
 done
 shopt -u nullglob
 
-if [ "${#VMLINUZ_FILES[@]}" -gt 0 ] && [ "${#MISSING_BOOSTER[@]}" -eq 0 ]; then
-    if xbps-query dracut &>/dev/null; then
-        xbps-remove -y dracut || true
-    fi
-else
-    echo "Warning: booster build failed for kernel(s): ${MISSING_BOOSTER[*]:-none detected in /boot}. Their dracut images were left in place and dracut stays installed; fix this and re-run booster build before removing dracut." >&2
+if [ "${#VMLINUZ_FILES[@]}" -eq 0 ] || [ "${#MISSING_BOOSTER[@]}" -gt 0 ]; then
+    echo "Warning: booster build failed for kernel(s): ${MISSING_BOOSTER[*]:-none found in /boot}. Limine will leave these kernels out; GRUB still has their dracut images." >&2
 fi
 
 # IMPORT FLATPAK BETA REPO
