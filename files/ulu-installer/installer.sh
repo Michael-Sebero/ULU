@@ -904,9 +904,10 @@ fi
 
 ### SWITCH INITRAMFS GENERATION FROM MKINITCPIO TO BOOSTER ###
 
+# booster runs "fsck -y"; fsck.f2fs treats -y like -f and does a full forced check every boot, so f2fs is left out
 BOOSTER_ROOTFS=$(findmnt -no FSTYPE /)
 case "$BOOSTER_ROOTFS" in
-    ext2|ext3|ext4|f2fs)
+    ext2|ext3|ext4)
         if command -v fsck &>/dev/null && command -v "fsck.$BOOSTER_ROOTFS" &>/dev/null && ! grep -q "^extra_files:" /etc/booster.yaml 2>/dev/null; then
             echo "extra_files: fsck,fsck.$BOOSTER_ROOTFS" >> /etc/booster.yaml
         fi
@@ -1593,15 +1594,6 @@ sed -i "/^modules_force_load:/d" /etc/booster.yaml
 
 # The Void booster package ships no regenerate_images; its kernel hook writes /boot/initramfs-<version>.img
 xbps-alternatives -s booster || echo "Warning: xbps-alternatives -s booster failed; dracut kernel hooks may remain active for future kernel updates." >&2
-
-BOOSTER_ROOTFS=$(findmnt -no FSTYPE /)
-case "$BOOSTER_ROOTFS" in
-    ext2|ext3|ext4|f2fs)
-        if command -v fsck &>/dev/null && command -v "fsck.$BOOSTER_ROOTFS" &>/dev/null && ! grep -q "^extra_files:" /etc/booster.yaml 2>/dev/null; then
-            echo "extra_files: fsck,fsck.$BOOSTER_ROOTFS" >> /etc/booster.yaml
-        fi
-        ;;
-esac
 
 shopt -s nullglob
 VMLINUZ_FILES=(/boot/vmlinuz-*)
