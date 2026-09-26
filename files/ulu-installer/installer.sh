@@ -1052,7 +1052,7 @@ shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$ldir/BOOTX64.EFI"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$esp/EFI/BOOT/BOOTX64.EFI"
-cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
+cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
 [ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
 [ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
 {
@@ -1145,7 +1145,7 @@ set -euo pipefail
 shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm644 /usr/share/limine/limine-bios.sys "$ldir/limine-bios.sys"
-cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ 2>/dev/null || true
+cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
 [ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
 [ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
 {
@@ -1313,15 +1313,23 @@ fi
 
 ### SWITCH INITRAMFS GENERATION FROM DRACUT TO BOOSTER ###
 
-xbps-alternatives -s booster 2>/dev/null || true
-/usr/lib/booster/regenerate_images 2>/dev/null || true
+xbps-alternatives -s booster || echo "Warning: xbps-alternatives -s booster failed; dracut kernel hooks may remain active for future kernel updates." >&2
+/usr/lib/booster/regenerate_images
 
 shopt -s nullglob
-BOOSTER_IMAGES=(/boot/booster-*.img)
+VMLINUZ_FILES=(/boot/vmlinuz-*)
+MISSING_BOOSTER=()
+for k in "${VMLINUZ_FILES[@]}"; do
+    suf="${k##*/vmlinuz-}"
+    [ -f "/boot/booster-$suf.img" ] || MISSING_BOOSTER+=("$suf")
+done
 shopt -u nullglob
 
-if [ "${#BOOSTER_IMAGES[@]}" -gt 0 ]; then
-    for img in "${BOOSTER_IMAGES[@]}"; do
+# Only trust booster and drop dracut once EVERY installed kernel actually has
+# a matching booster image - a partial regenerate_images failure must not
+# strip the fallback generator out from under a kernel that still needs it.
+if [ "${#VMLINUZ_FILES[@]}" -gt 0 ] && [ "${#MISSING_BOOSTER[@]}" -eq 0 ]; then
+    for img in /boot/booster-*.img; do
         base=$(basename "$img")
         ln -sf "$base" "/boot/${base/booster-/initramfs-}"
     done
@@ -1330,7 +1338,7 @@ if [ "${#BOOSTER_IMAGES[@]}" -gt 0 ]; then
         xbps-remove -y dracut || true
     fi
 else
-    echo "Warning: no Booster images found in /boot, leaving dracut in place and skipping the GRUB alias." >&2
+    echo "Warning: booster image missing for kernel(s): ${MISSING_BOOSTER[*]:-none detected in /boot}. Leaving dracut installed as a fallback; fix this (check disk space and regenerate_images output above) and re-run /usr/lib/booster/regenerate_images before removing dracut." >&2
 fi
 
 # IMPORT FLATPAK BETA REPO
