@@ -213,6 +213,23 @@ booster_for() {
     y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
     grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
 }
+build_booster() {
+    local v="\$1" out="\$2" avail m keep="" dropped="" cfg
+    if (umask 0077; booster build --force --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; return 0; fi
+    rm -f "\$out.new"
+    avail=\$(sed -e "s/:.*//" "/usr/lib/modules/\$v/modules.dep" "/usr/lib/modules/\$v/modules.builtin" 2>/dev/null | sed -e "s|.*/||" -e "s/\.ko.*//" | tr - _) || true
+    for m in \$(sed -n "s/^modules_force_load://p" /etc/booster.yaml | tr "," " "); do
+        if grep -qxF "\${m//-/_}" <<< "\$avail"; then keep+="\$m,"; else dropped+=" \$m"; fi
+    done
+    [ -n "\$dropped" ] || return 1
+    cfg=\$(mktemp)
+    sed "/^modules_force_load:/d" /etc/booster.yaml > "\$cfg"
+    if [ -n "\$keep" ]; then echo "modules_force_load: \${keep%,}" >> "\$cfg"; fi
+    echo "limine-sync: kernel \$v lacks force-loaded module(s):\$dropped; building its booster image without them" >&2
+    if (umask 0077; booster build --force --config "\$cfg" --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; rm -f "\$cfg"; return 0; fi
+    rm -f "\$out.new" "\$cfg"
+    return 1
+}
 stage() {
     cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
     keep+="\${1##*/} "
@@ -229,7 +246,7 @@ keep=" "
         k="/boot/vmlinuz-\$p"; i="/boot/booster-\$p.img"; label="\$p"
         [ -f "\$k" ] || continue
         if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
-            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+            build_booster "\$v" "\$i" || true
         fi
         if ! booster_for "\$i" "\$v"; then
             skipped+=" \$label"
@@ -347,6 +364,23 @@ booster_for() {
     y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
     grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
 }
+build_booster() {
+    local v="\$1" out="\$2" avail m keep="" dropped="" cfg
+    if (umask 0077; booster build --force --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; return 0; fi
+    rm -f "\$out.new"
+    avail=\$(sed -e "s/:.*//" "/usr/lib/modules/\$v/modules.dep" "/usr/lib/modules/\$v/modules.builtin" 2>/dev/null | sed -e "s|.*/||" -e "s/\.ko.*//" | tr - _) || true
+    for m in \$(sed -n "s/^modules_force_load://p" /etc/booster.yaml | tr "," " "); do
+        if grep -qxF "\${m//-/_}" <<< "\$avail"; then keep+="\$m,"; else dropped+=" \$m"; fi
+    done
+    [ -n "\$dropped" ] || return 1
+    cfg=\$(mktemp)
+    sed "/^modules_force_load:/d" /etc/booster.yaml > "\$cfg"
+    if [ -n "\$keep" ]; then echo "modules_force_load: \${keep%,}" >> "\$cfg"; fi
+    echo "limine-sync: kernel \$v lacks force-loaded module(s):\$dropped; building its booster image without them" >&2
+    if (umask 0077; booster build --force --config "\$cfg" --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; rm -f "\$cfg"; return 0; fi
+    rm -f "\$out.new" "\$cfg"
+    return 1
+}
 stage() {
     cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
     keep+="\${1##*/} "
@@ -363,7 +397,7 @@ keep=" "
         k="/boot/vmlinuz-\$p"; i="/boot/booster-\$p.img"; label="\$p"
         [ -f "\$k" ] || continue
         if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
-            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+            build_booster "\$v" "\$i" || true
         fi
         if ! booster_for "\$i" "\$v"; then
             skipped+=" \$label"
@@ -1162,6 +1196,23 @@ booster_for() {
     y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
     grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
 }
+build_booster() {
+    local v="\$1" out="\$2" avail m keep="" dropped="" cfg
+    if (umask 0077; booster build --force --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; return 0; fi
+    rm -f "\$out.new"
+    avail=\$(sed -e "s/:.*//" "/usr/lib/modules/\$v/modules.dep" "/usr/lib/modules/\$v/modules.builtin" 2>/dev/null | sed -e "s|.*/||" -e "s/\.ko.*//" | tr - _) || true
+    for m in \$(sed -n "s/^modules_force_load://p" /etc/booster.yaml | tr "," " "); do
+        if grep -qxF "\${m//-/_}" <<< "\$avail"; then keep+="\$m,"; else dropped+=" \$m"; fi
+    done
+    [ -n "\$dropped" ] || return 1
+    cfg=\$(mktemp)
+    sed "/^modules_force_load:/d" /etc/booster.yaml > "\$cfg"
+    if [ -n "\$keep" ]; then echo "modules_force_load: \${keep%,}" >> "\$cfg"; fi
+    echo "limine-sync: kernel \$v lacks force-loaded module(s):\$dropped; building its booster image without them" >&2
+    if (umask 0077; booster build --force --config "\$cfg" --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; rm -f "\$cfg"; return 0; fi
+    rm -f "\$out.new" "\$cfg"
+    return 1
+}
 stage() {
     cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
     keep+="\${1##*/} "
@@ -1176,7 +1227,7 @@ keep=" "
         k="/boot/vmlinuz-\$v"; i="/boot/initramfs-\$v.img"; label="\$v"
         [ -f "\$k" ] || continue
         if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
-            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+            build_booster "\$v" "\$i" || true
         fi
         if ! booster_for "\$i" "\$v"; then
             skipped+=" \$label"
@@ -1294,6 +1345,23 @@ booster_for() {
     y=\$(booster cat "\$1" etc/booster.init.yaml 2>/dev/null) || return 1
     grep -qxF "kernel: \$2" < <(printf "%s\n" "\$y" | tr -d "\047\"")
 }
+build_booster() {
+    local v="\$1" out="\$2" avail m keep="" dropped="" cfg
+    if (umask 0077; booster build --force --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; return 0; fi
+    rm -f "\$out.new"
+    avail=\$(sed -e "s/:.*//" "/usr/lib/modules/\$v/modules.dep" "/usr/lib/modules/\$v/modules.builtin" 2>/dev/null | sed -e "s|.*/||" -e "s/\.ko.*//" | tr - _) || true
+    for m in \$(sed -n "s/^modules_force_load://p" /etc/booster.yaml | tr "," " "); do
+        if grep -qxF "\${m//-/_}" <<< "\$avail"; then keep+="\$m,"; else dropped+=" \$m"; fi
+    done
+    [ -n "\$dropped" ] || return 1
+    cfg=\$(mktemp)
+    sed "/^modules_force_load:/d" /etc/booster.yaml > "\$cfg"
+    if [ -n "\$keep" ]; then echo "modules_force_load: \${keep%,}" >> "\$cfg"; fi
+    echo "limine-sync: kernel \$v lacks force-loaded module(s):\$dropped; building its booster image without them" >&2
+    if (umask 0077; booster build --force --config "\$cfg" --kernel-version "\$v" "\$out.new") >&2; then mv -f "\$out.new" "\$out"; rm -f "\$cfg"; return 0; fi
+    rm -f "\$out.new" "\$cfg"
+    return 1
+}
 stage() {
     cmp -s "\$1" "$ldir/\${1##*/}" || cp -f "\$1" "$ldir/"
     keep+="\${1##*/} "
@@ -1308,7 +1376,7 @@ keep=" "
         k="/boot/vmlinuz-\$v"; i="/boot/initramfs-\$v.img"; label="\$v"
         [ -f "\$k" ] || continue
         if ! booster_for "\$i" "\$v" && [ -d "/usr/lib/modules/\$v" ]; then
-            if (umask 0077; booster build --force --kernel-version "\$v" "\$i.new") >&2; then mv -f "\$i.new" "\$i"; else rm -f "\$i.new"; fi
+            build_booster "\$v" "\$i" || true
         fi
         if ! booster_for "\$i" "\$v"; then
             skipped+=" \$label"
@@ -1499,12 +1567,27 @@ fi
 
 ### FORCE-LOAD GPU KMS MODULE INTO BOOSTER (host-mode autodetection misses it in a chroot) ###
 
-vm_modules="virtio_gpu,bochs,qxl,cirrus,vmwgfx,vboxvideo,hyperv_drm"
+# booster aborts the whole build if a force-loaded module is missing for that kernel (cirrus became cirrus-qemu in 6.14)
 case "$choice" in
-    1|2) echo "modules_force_load: amdgpu,$vm_modules" >> /etc/booster.yaml ;;
-    3|4) echo "modules_force_load: i915,$vm_modules" >> /etc/booster.yaml ;;
-    5|6) echo "modules_force_load: nvidia,nvidia_modeset,nvidia_uvm,nvidia_drm,$vm_modules" >> /etc/booster.yaml ;;
+    1|2) gpu_modules="amdgpu" ;;
+    3|4) gpu_modules="i915" ;;
+    5|6) gpu_modules="nvidia nvidia_modeset nvidia_uvm nvidia_drm" ;;
 esac
+force_load=""
+for mod in $gpu_modules virtio_gpu bochs qxl cirrus_qemu cirrus vmwgfx vboxvideo hyperv_drm; do
+    missing_in=""
+    for k in /boot/vmlinuz-*; do
+        v="${k##*/vmlinuz-}"
+        sed -e "s/:.*//" "/usr/lib/modules/$v/modules.dep" "/usr/lib/modules/$v/modules.builtin" 2>/dev/null | sed -e "s|.*/||" -e "s/\.ko.*//" | tr - _ | grep -qxF "$mod" || missing_in+=" $v"
+    done
+    if [ -z "$missing_in" ]; then
+        force_load+="$mod,"
+    elif [[ " $gpu_modules " == *" $mod "* ]]; then
+        echo "Warning: $mod is missing for kernel(s):$missing_in; booster will not force-load it." >&2
+    fi
+done
+sed -i "/^modules_force_load:/d" /etc/booster.yaml
+[ -n "$force_load" ] && echo "modules_force_load: ${force_load%,}" >> /etc/booster.yaml
 
 ### SWITCH INITRAMFS GENERATION FROM DRACUT TO BOOSTER ###
 
