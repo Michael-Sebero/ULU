@@ -37,7 +37,7 @@ Originally, I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithx
 * Machine ID and MAC address randomization
 * [ALHP](https://wiki.archlinux.org/title/Unofficial_user_repositories#ALHP), [Chaotic AUR](https://github.com/chaotic-aur/packages) (for Arch-based systems) and [Flatpak](https://flatpak.org/) repositories
 * Steam [Proton GE](https://github.com/GloriousEggroll/proton-ge-custom) prefix
-* [Booster](https://github.com/anatol/booster) - Faster mkinitcpio replacement
+* [Booster](https://github.com/anatol/booster) - Faster mkinitcpio/dracut replacement
 * Battery life optimizations for laptops via [TLP](https://github.com/linrunner/TLP)
 * Some processes are enhanced by [Mimalloc](https://github.com/microsoft/mimalloc), a high-performance memory allocator replacement
 * [Ephemeral Overlay](https://github.com/Michael-Sebero/Ephemeral-Overlay) - Speeds up temporary/root directories and reduces disk I/O

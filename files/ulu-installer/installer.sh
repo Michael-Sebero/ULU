@@ -1609,8 +1609,15 @@ for k in "${VMLINUZ_FILES[@]}"; do
 done
 shopt -u nullglob
 
-if [ "${#VMLINUZ_FILES[@]}" -eq 0 ] || [ "${#MISSING_BOOSTER[@]}" -gt 0 ]; then
-    echo "Warning: booster build failed for kernel(s): ${MISSING_BOOSTER[*]:-none found in /boot}. Limine will leave these kernels out; GRUB still has their dracut images." >&2
+# linux-base depends on dracut and booster provides no substitute, so dracut must be ignored before xbps will remove it
+if [ "${#VMLINUZ_FILES[@]}" -gt 0 ] && [ "${#MISSING_BOOSTER[@]}" -eq 0 ]; then
+    mkdir -p /etc/xbps.d
+    echo "ignorepkg=dracut" > /etc/xbps.d/ignore-dracut.conf
+    if xbps-query dracut &>/dev/null; then
+        xbps-remove -y dracut || echo "Warning: xbps-remove dracut failed; booster stays the active initramfs alternative regardless." >&2
+    fi
+else
+    echo "Warning: booster build failed for kernel(s): ${MISSING_BOOSTER[*]:-none found in /boot}. Leaving dracut installed; Limine will leave these kernels out and GRUB still has their dracut images." >&2
 fi
 
 # IMPORT FLATPAK BETA REPO
