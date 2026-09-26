@@ -1311,6 +1311,14 @@ if [ "$choice" = "6" ]; then
     fail2ban cpupower
 fi
 
+### FORCE-LOAD GPU KMS MODULE INTO BOOSTER (host-mode autodetection misses it in a chroot) ###
+
+case "$choice" in
+    1|2) echo "modules_force_load: amdgpu" >> /etc/booster.yaml ;;
+    3|4) echo "modules_force_load: i915" >> /etc/booster.yaml ;;
+    5|6) echo "modules_force_load: nvidia,nvidia_modeset,nvidia_uvm,nvidia_drm" >> /etc/booster.yaml ;;
+esac
+
 ### SWITCH INITRAMFS GENERATION FROM DRACUT TO BOOSTER ###
 
 xbps-alternatives -s booster || echo "Warning: xbps-alternatives -s booster failed; dracut kernel hooks may remain active for future kernel updates." >&2
