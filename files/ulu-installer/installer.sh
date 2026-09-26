@@ -1052,7 +1052,10 @@ shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$ldir/BOOTX64.EFI"
 install -Dm755 /usr/share/limine/BOOTX64.EFI "$esp/EFI/BOOT/BOOTX64.EFI"
-cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
+cp -u /boot/vmlinuz-* /boot/initramfs-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
+for f in "$ldir"/vmlinuz-* "$ldir"/initramfs-*.img; do
+    [ -e "/boot/\${f##*/}" ] || rm -f "\$f"
+done
 [ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
 [ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
 {
@@ -1062,7 +1065,7 @@ cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ || echo "Warning: copying boo
         printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/EFI/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
         [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/EFI/limine/amd-ucode.img"
         [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/EFI/limine/intel-ucode.img"
-        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/EFI/limine/booster-\$suf.img"
+        [ -f "$ldir/initramfs-\$suf.img" ] && echo "    module_path: boot():/EFI/limine/initramfs-\$suf.img"
     done
 } > "$ldir/limine.conf"
 SYNC
@@ -1074,6 +1077,11 @@ SYNC
 
         if [ ! -f "$ldir/BOOTX64.EFI" ] || [ ! -f "$esp/EFI/BOOT/BOOTX64.EFI" ] || [ ! -s "$ldir/limine.conf" ]; then
             echo "Warning: limine-sync ran but BOOTX64.EFI and/or limine.conf are missing under $esp. Skipping NVRAM entry; GRUB remains the sole bootloader." >&2
+            return 1
+        fi
+
+        if [ "$(grep -c "^/Linux" "$ldir/limine.conf")" -ne "$(grep -c "module_path: .*/initramfs-" "$ldir/limine.conf")" ]; then
+            echo "Warning: a Limine entry in $ldir/limine.conf has no initramfs and would panic on root=UUID. Skipping Limine; GRUB remains the sole bootloader." >&2
             return 1
         fi
 
@@ -1145,7 +1153,10 @@ set -euo pipefail
 shopt -s nullglob
 mkdir -p "$ldir"
 install -Dm644 /usr/share/limine/limine-bios.sys "$ldir/limine-bios.sys"
-cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
+cp -u /boot/vmlinuz-* /boot/initramfs-*.img "$ldir"/ || echo "Warning: copying boot files to $ldir failed or was incomplete - check free space with: df -h $ldir" >&2
+for f in "$ldir"/vmlinuz-* "$ldir"/initramfs-*.img; do
+    [ -e "/boot/\${f##*/}" ] || rm -f "\$f"
+done
 [ -f /boot/amd-ucode.img ] && cp -u /boot/amd-ucode.img "$ldir/"
 [ -f /boot/intel-ucode.img ] && cp -u /boot/intel-ucode.img "$ldir/"
 {
@@ -1155,12 +1166,17 @@ cp -u /boot/vmlinuz-* /boot/booster-*.img "$ldir"/ || echo "Warning: copying boo
         printf "\n/Linux (%s)\n    protocol: linux\n    path: boot():/limine/vmlinuz-%s\n    cmdline: %s\n" "\$suf" "\$suf" "$cmdline"
         [ -f "$ldir/amd-ucode.img" ] && echo "    module_path: boot():/limine/amd-ucode.img"
         [ -f "$ldir/intel-ucode.img" ] && echo "    module_path: boot():/limine/intel-ucode.img"
-        [ -f "$ldir/booster-\$suf.img" ] && echo "    module_path: boot():/limine/booster-\$suf.img"
+        [ -f "$ldir/initramfs-\$suf.img" ] && echo "    module_path: boot():/limine/initramfs-\$suf.img"
     done
 } > "$ldir/limine.conf"
 SYNC
         chmod +x /usr/local/bin/limine-sync
         /usr/local/bin/limine-sync
+
+        if [ "$(grep -c "^/Linux" "$ldir/limine.conf")" -ne "$(grep -c "module_path: .*/initramfs-" "$ldir/limine.conf")" ]; then
+            echo "Warning: a Limine entry in $ldir/limine.conf has no initramfs and would panic on root=UUID. Skipping Limine; GRUB remains the sole bootloader." >&2
+            return 1
+        fi
 
         local pttype biospart="" ptype biospartnum
         pttype=$(blkid -p -o value -s PTTYPE "$disk" 2>/dev/null)
@@ -1322,29 +1338,29 @@ esac
 
 ### SWITCH INITRAMFS GENERATION FROM DRACUT TO BOOSTER ###
 
+# The Void booster package ships no regenerate_images; its kernel hook writes /boot/initramfs-<version>.img
 xbps-alternatives -s booster || echo "Warning: xbps-alternatives -s booster failed; dracut kernel hooks may remain active for future kernel updates." >&2
-/usr/lib/booster/regenerate_images
 
 shopt -s nullglob
 VMLINUZ_FILES=(/boot/vmlinuz-*)
 MISSING_BOOSTER=()
 for k in "${VMLINUZ_FILES[@]}"; do
-    suf="${k##*/vmlinuz-}"
-    [ -f "/boot/booster-$suf.img" ] || MISSING_BOOSTER+=("$suf")
+    kver="${k##*/vmlinuz-}"
+    if [ -d "/usr/lib/modules/$kver" ] && (umask 0077; booster build --force --kernel-version "$kver" "/boot/initramfs-$kver.img.new"); then
+        mv -f "/boot/initramfs-$kver.img.new" "/boot/initramfs-$kver.img"
+    else
+        rm -f "/boot/initramfs-$kver.img.new"
+        MISSING_BOOSTER+=("$kver")
+    fi
 done
 shopt -u nullglob
 
 if [ "${#VMLINUZ_FILES[@]}" -gt 0 ] && [ "${#MISSING_BOOSTER[@]}" -eq 0 ]; then
-    for img in /boot/booster-*.img; do
-        base=$(basename "$img")
-        ln -sf "$base" "/boot/${base/booster-/initramfs-}"
-    done
-
     if xbps-query dracut &>/dev/null; then
         xbps-remove -y dracut || true
     fi
 else
-    echo "Warning: booster image missing for kernel(s): ${MISSING_BOOSTER[*]:-none detected in /boot}. Leaving dracut installed as a fallback; fix this (check disk space and regenerate_images output above) and re-run /usr/lib/booster/regenerate_images before removing dracut." >&2
+    echo "Warning: booster build failed for kernel(s): ${MISSING_BOOSTER[*]:-none detected in /boot}. Their dracut images were left in place and dracut stays installed; fix this and re-run booster build before removing dracut." >&2
 fi
 
 # IMPORT FLATPAK BETA REPO
