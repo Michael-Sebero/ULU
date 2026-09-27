@@ -1566,29 +1566,11 @@ if [ "$choice" = "6" ]; then
     fail2ban cpupower
 fi
 
-### FORCE-LOAD GPU KMS MODULE INTO BOOSTER (host-mode autodetection misses it in a chroot) ###
+### KEEP GPU DRIVERS OUT OF BOOSTER ###
 
-# booster aborts the whole build if a force-loaded module is missing for that kernel (cirrus became cirrus-qemu in 6.14)
-case "$choice" in
-    1|2) gpu_modules="amdgpu" ;;
-    3|4) gpu_modules="i915" ;;
-    5|6) gpu_modules="nvidia nvidia_modeset nvidia_uvm nvidia_drm" ;;
-esac
-force_load=""
-for mod in $gpu_modules virtio_gpu bochs qxl cirrus_qemu cirrus vmwgfx vboxvideo hyperv_drm; do
-    missing_in=""
-    for k in /boot/vmlinuz-*; do
-        v="${k##*/vmlinuz-}"
-        sed -e "s/:.*//" "/usr/lib/modules/$v/modules.dep" "/usr/lib/modules/$v/modules.builtin" 2>/dev/null | sed -e "s|.*/||" -e "s/\.ko.*//" | tr - _ | grep -qxF "$mod" || missing_in+=" $v"
-    done
-    if [ -z "$missing_in" ]; then
-        force_load+="$mod,"
-    elif [[ " $gpu_modules " == *" $mod "* ]]; then
-        echo "Warning: $mod is missing for kernel(s):$missing_in; booster will not force-load it." >&2
-    fi
-done
+# runit stage 1 (02-udev.sh) loads the GPU driver and runs udevadm settle before any service starts;
+# force-loading GPU drivers here puts them ahead of the storage drivers in the kernel module-load queue
 sed -i "/^modules_force_load:/d" /etc/booster.yaml
-[ -n "$force_load" ] && echo "modules_force_load: ${force_load%,}" >> /etc/booster.yaml
 
 ### SWITCH INITRAMFS GENERATION FROM DRACUT TO BOOSTER ###
 
