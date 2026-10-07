@@ -809,7 +809,7 @@ pacman-key --init
 
 pacman -Sy --noconfirm --needed git base-devel
 mkdir /home/ulu-files/
-git clone https://github.com/Michael-Sebero/ULU /home/ulu-files/
+git clone --depth 1 https://github.com/Michael-Sebero/ULU /home/ulu-files/
 cd /home/ulu-files/files/ulu-packages/
 if [ "$DISTRO" = "artix" ]; then
     pacman -Sy --noconfirm artix-archlinux-support pacman-contrib artix-keyring archlinux-keyring artix-mirrorlist archlinux-mirrorlist
@@ -1687,7 +1687,7 @@ read -p "Enter your choice (1-6): " choice
 
 xbps-install -Syu git xbps
 mkdir -p /home/ulu-files/
-git clone https://github.com/Michael-Sebero/ULU /home/ulu-files/
+git clone --depth 1 https://github.com/Michael-Sebero/ULU /home/ulu-files/
 cd /home/ulu-files/files/ulu-packages/
 
 # ENABLE NONFREE + MULTILIB REPOS (needed for Steam, NVIDIA, 32-bit libs, etc.)
@@ -2034,7 +2034,7 @@ apt-get update
 ### FIRST COMMANDS AND ULU IMPORT P1 ###
 
 mkdir -p /home/ulu-files/
-git clone https://github.com/Michael-Sebero/ULU /home/ulu-files/
+git clone --depth 1 https://github.com/Michael-Sebero/ULU /home/ulu-files/
 cd /home/ulu-files/files/ulu-packages/
 
 ### FULL SYSTEM UPDATE WITH RETRIES ###

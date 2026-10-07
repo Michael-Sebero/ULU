@@ -110,7 +110,7 @@ The desktop scheduler is set to `IMPERATOR` and laptops use `AURA`. `IMPERATOR` 
 ### Memory Management
 RAM usage has the highest priority over swapping. Keeping active data in memory reduces wear on the drive and increases system responsiveness. Swapping is still possible but only used when RAM is nearly filled. The VM subsystem is configured to reduce unnecessary memory compaction overhead while maintaining balanced VFS cache pressure for responsive file operations. HugePages are dynamically allocated on demand, providing up to 3968 large pages to reduce overhead and fragmentation for large memory workloads.
 
-**ZRAM Integration:** The system configures a zram-based swap device `/dev/zram0` to provide fast, compressed virtual memory utilizing the [LZ4](https://lz4.org/) compression algorithm. ZRAM allocation is dynamically set to 25% of total RAM. The device is initialized with `mkswap` and immediately activated with `swapon`.
+**ZRAM Integration:** The system configures a zram-based swap device `/dev/zram0` to provide fast, compressed virtual memory utilizing the [LZ4](https://lz4.org/) compression algorithm. ZRAM allocation is dynamically set to 25% of total RAM. The device is initialized with `mkswap` and immediately activated with `swapon`. Zswap is turned off once ZRAM is active so pages aren't compressed twice.
 
 ### Ephemeral Overlay System
 
@@ -149,7 +149,7 @@ These directories are bind-mounted from disk into the TMPFS above them, so they 
 Network performance leverages `BBR` congestion control and `fq` queue management to improve performance and reduce latency. The TCP stack uses expanded buffer sizes and enables fast connections. IPv6 is limited through restrictive ICMP and routing settings. NetworkManager uses its internal DHCP client with hostname handling disabled, along with DNS encryption via [LibreDNS](https://libredns.gr/).
 
 ### Filesystem & I/O Optimization
-Disk and SSD performance is tuned through scheduler and queue optimizations. NVMe drives use the `none` scheduler, SATA SSDs use `mq-deadline` and HDDs use `bfq` for fairness under mixed workloads. Read-ahead is set to 128 KB for NVMe and 2048 KB for SATA drives. The I/O queue depth is 2048 for SATA SSDs and 128 for HDDs, while NVMe drives keep their hardware queue depth. I/O request merging stays enabled to combine adjacent requests.
+Disk and SSD performance is tuned through scheduler and queue optimizations. NVMe drives use `kyber`, which keeps read latency low while writes are in flight, SATA SSDs use `mq-deadline` and HDDs use `bfq` for fairness under mixed workloads. Read-ahead is set to 128 KB for NVMe and 2048 KB for SATA drives. The I/O queue depth is 2048 for SATA SSDs and 128 for HDDs, while NVMe drives use the kernel's default for a scheduled queue (256 on most drives). I/O request merging stays enabled to combine adjacent requests.
 
 **F2FS:** Root and home partitions formatted with F2FS are optimized with background garbage collection enabled and tuned idle detection intervals to maintain flash-based storage performance consistency. To preserve SSD longevity and prevent write performance degradation, the system runs TRIM operations once every 7 days, reclaiming unused blocks. These processes ensure efficient resource use across F2FS filesystems.
 

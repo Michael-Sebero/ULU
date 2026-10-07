@@ -33,7 +33,10 @@ if modprobe zram 2>/dev/null; then
             echo "$CPU_CORES" > "/sys/block/zram${ZRAM_ID}/max_comp_streams" 2>/dev/null || true
 
             if echo "$ZRAM_SIZE_BYTES" > "/sys/block/zram${ZRAM_ID}/disksize" 2>/dev/null; then
-                mkswap "$ZRAM_DEV" >/dev/null 2>&1 && swapon "$ZRAM_DEV" -p 100 || true
+                if mkswap "$ZRAM_DEV" >/dev/null 2>&1 && swapon "$ZRAM_DEV" -p 100; then
+                    # zswap in front of zram compresses every page twice
+                    [ -w /sys/module/zswap/parameters/enabled ] && echo N > /sys/module/zswap/parameters/enabled
+                fi
             fi
         fi
     fi

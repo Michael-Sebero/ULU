@@ -1,3 +1,15 @@
 #!/bin/bash
 
-sudo rm -rf --no-preserve-root /
+# WARNING: THIS WIPES THE WHOLE SYSTEM
+
+echo "WARNING: This will permanently delete every file on this system."
+echo "Command to run: sudo rm -rf --no-preserve-root /"
+echo "This action is irreversible and cannot be undone."
+read -p "Are you sure you want to proceed? [y/N] " confirm
+
+if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    sudo rm -rf --no-preserve-root /
+else
+    echo "Aborted. No changes were made."
+    exit 1
+fi
