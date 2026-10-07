@@ -118,7 +118,7 @@
  . boot-params
  
  - This command detects LUKS, LVM, RAID and btrfs subvolume roots and writes the kernel parameters they need to /etc/default/grub.local.
- - Run it after changing how / is stored. [ update-boot ] and [ upgrade ] run it automatically.
+   Run it after changing how / is stored. [ update-boot ] and [ upgrade ] run it automatically.
 
 ..................................................................................................................................................
 
