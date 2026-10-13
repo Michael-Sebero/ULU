@@ -1,0 +1,6 @@
+# Spinning ATA drives: APM 254 (no spin-down) and no standby timeout, except where TLP is installed (laptops):
+# there DISK_APM_LEVEL_ON_AC/BAT and DISK_SPINDOWN_TIMEOUT_ON_AC/BAT in /etc/tlp.conf decide. USB drives are left alone
+TEST=="/etc/tlp.conf", GOTO="hdd_power_end"
+TEST!="/usr/sbin/hdparm", GOTO="hdd_power_end"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="1", ENV{ID_BUS}=="ata", ENV{ID_USB_DRIVER}=="", RUN+="/usr/sbin/hdparm -B 254 -S 0 /dev/%k"
+LABEL="hdd_power_end"

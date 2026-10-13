@@ -700,7 +700,7 @@ else
 fi
 
 # Base packages
-base_packages="unrar gamemode lib32-gamemode dnscrypt-proxy dnsmasq apparmor gufw macchanger lynis rkhunter chkrootkit preload mimalloc ccache cpupower fail2ban scx-scheds clamav earlyoom booster"
+base_packages="unrar gamemode lib32-gamemode dnscrypt-proxy dnsmasq apparmor gufw macchanger lynis rkhunter chkrootkit preload mimalloc ccache cpupower fail2ban scx-scheds clamav earlyoom booster hdparm"
 
 # Optional packages: if they're not installed they are SKIPPED (not MISSING),
 # so they don't contribute to the score. If they ARE installed, they're

@@ -8,6 +8,9 @@ ufw --force enable || true
 # Package Manager: Lock File Cleanup
 [ -f /var/lib/pacman/db.lck ] && rm -f /var/lib/pacman/db.lck
 
+# Gaming: NTSYNC Driver for Wine/Proton
+modprobe ntsync 2>/dev/null || true
+
 # Memory Management: Compressed RAM Device Configuration
 if modprobe zram 2>/dev/null; then
     if [ -f /sys/class/zram-control/hot_add ]; then

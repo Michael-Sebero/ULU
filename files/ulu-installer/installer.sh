@@ -949,7 +949,7 @@ careful_install \
   inotify-tools preload dialog tree parallel sof-firmware booster vulkan-tools mimalloc mold \
   protontricks-git poetry pyenv python-pip ccache yt-dlp-git \
   lib32-libdisplay-info realtime-privileges gallery-dl tesseract-data-eng \
-  scx-scheds debtap fwupd chrony dnsmasq mesa lib32-mesa tk nix rsync limine
+  scx-scheds debtap fwupd chrony dnsmasq mesa lib32-mesa tk nix rsync limine hdparm
 
 ### REMOVE COMPETING NETWORK PACKAGES ###
 
@@ -1733,7 +1733,7 @@ careful_install \
   inotify-tools preload dialog tree parallel sof-firmware booster Vulkan-Tools mimalloc mold \
   protontricks python3-pip ccache yt-dlp \
   libdisplay-info-32bit gallery-dl tesseract-ocr tesseract-ocr-eng \
-  fwupd chrony dnsmasq mesa mesa-32bit tk scx libgamemode-32bit nix rsync limine
+  fwupd chrony dnsmasq mesa mesa-32bit tk scx libgamemode-32bit nix rsync limine hdparm
 
 # Headers for the currently running/installed kernel (needed by DKMS drivers like NVIDIA).
 KVER=$(uname -r | cut -d. -f1-2)
@@ -2101,7 +2101,7 @@ careful_install \
   inotify-tools preload dialog tree parallel firmware-sof-signed vulkan-tools libmimalloc2.0 mold \
   python3-pip ccache yt-dlp \
   gallery-dl tesseract-ocr-eng \
-  fwupd chrony dnsmasq mesa-utils libgl1-mesa-dri:i386 tk
+  fwupd chrony dnsmasq mesa-utils libgl1-mesa-dri:i386 tk hdparm
 
 ### INSTALL NIX PACKAGE MANAGER ###
 

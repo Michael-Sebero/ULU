@@ -1,0 +1,6 @@
+# SATA link power management at max_performance, except where TLP is installed (laptops):
+# there SATA_LINKPWR_ON_AC/BAT in /etc/tlp.conf decides. Kernels 6.17+ report hosts without LPM, which are skipped
+TEST=="/etc/tlp.conf", GOTO="sata_link_power_end"
+ACTION=="add", SUBSYSTEM=="scsi_host", KERNEL=="host*", TEST=="link_power_management_supported", ATTR{link_power_management_supported}!="1", GOTO="sata_link_power_end"
+ACTION=="add", SUBSYSTEM=="scsi_host", KERNEL=="host*", TEST=="link_power_management_policy", ATTR{link_power_management_policy}="max_performance"
+LABEL="sata_link_power_end"

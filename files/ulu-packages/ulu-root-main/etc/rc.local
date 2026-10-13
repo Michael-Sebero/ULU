@@ -8,6 +8,9 @@
 # Package Manager: Lock File Cleanup
 { rm -f /var/lib/pacman/db.lck || true; } &
 
+# Gaming: NTSYNC Driver for Wine/Proton
+{ modprobe ntsync 2>/dev/null || true; } &
+
 # GPU Performance Optimization
 {
     GPU_VENDOR=""

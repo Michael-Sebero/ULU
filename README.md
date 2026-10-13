@@ -44,6 +44,7 @@ Originally, I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithx
 * [Real-time](https://gitlab.archlinux.org/archlinux/packaging/packages/realtime-privileges) audio processing
 * A [Lynis](https://github.com/CISOfy/lynis) system hardening rating of **78** (on the latest Lynis version)
 * [GameMode](https://github.com/FeralInteractive/gamemode) - Performance on demand utility for games
+* [NTSYNC](https://docs.kernel.org/userspace-api/ntsync.html) - Kernel driver for Windows NT synchronization primitives used by Wine/Proton, loaded at boot
 * [SCX](https://github.com/sched-ext/scx) - Dynamic scheduler extension framework
 * [Game Focus](https://github.com/Michael-Sebero/Game-Focus) - A command that kills most system processes and launches Steam
 * [Package Dictionary](https://github.com/Michael-Sebero/Package-Dictionary) - Package search tool
@@ -149,7 +150,7 @@ These directories are bind-mounted from disk into the TMPFS above them, so they 
 Network performance leverages `BBR` congestion control and `fq` queue management to improve performance and reduce latency. The TCP stack uses expanded buffer sizes and enables fast connections. IPv6 is limited through restrictive ICMP and routing settings. NetworkManager uses its internal DHCP client with hostname handling disabled, along with DNS encryption via [LibreDNS](https://libredns.gr/).
 
 ### Filesystem & I/O Optimization
-Disk and SSD performance is tuned through scheduler and queue optimizations. NVMe drives use `kyber`, which keeps read latency low while writes are in flight, SATA SSDs use `mq-deadline` and HDDs use `bfq` for fairness under mixed workloads. Read-ahead is set to 128 KB for NVMe and 2048 KB for SATA drives. The I/O queue depth is 2048 for SATA SSDs and 128 for HDDs, while NVMe drives use the kernel's default for a scheduled queue (256 on most drives). I/O request merging stays enabled to combine adjacent requests.
+Disk and SSD performance is tuned through scheduler and queue optimizations. NVMe drives use `kyber`, which keeps read latency low while writes are in flight, SATA SSDs use `mq-deadline` and HDDs use `bfq` for fairness under mixed workloads. Read-ahead is set to 128 KB for NVMe and 2048 KB for SATA drives. The I/O queue depth is 2048 for SATA SSDs and 128 for HDDs, while NVMe drives use the kernel's default for a scheduled queue (256 on most drives). I/O request merging stays enabled to combine adjacent requests. On desktops, SATA links stay at `max_performance` link power management and spinning drives get `hdparm -B 254 -S 0`, so they don't spin down; TLP handles both on laptops.
 
 **F2FS:** Root and home partitions formatted with F2FS are optimized with background garbage collection enabled and tuned idle detection intervals to maintain flash-based storage performance consistency. To preserve SSD longevity and prevent write performance degradation, the system runs TRIM operations once every 7 days, reclaiming unused blocks. These processes ensure efficient resource use across F2FS filesystems.
 
