@@ -190,6 +190,31 @@
     fi
 } &
 
+# Logging: Volatile Journal (systemd only) and Pstore Crash Log Archival
+{
+    if [ -d /run/systemd/system ]; then
+        JOURNAL_CONF=/etc/systemd/journald.conf.d/90-ulu.conf
+        JOURNAL_WANT=$(printf '%s\n' \
+            '# Restored by /etc/rc.local at boot; override with a later file such as 99-local.conf' \
+            '[Journal]' \
+            'Storage=volatile' \
+            'RuntimeMaxUse=50M')
+        if [ "$(cat "$JOURNAL_CONF" 2>/dev/null)" != "$JOURNAL_WANT" ]; then
+            mkdir -p "${JOURNAL_CONF%/*}"
+            printf '%s\n' "$JOURNAL_WANT" > "$JOURNAL_CONF" && systemctl restart systemd-journald
+        fi
+        [ "$(systemctl is-enabled systemd-pstore.service 2>/dev/null)" = disabled ] && systemctl -q enable --no-reload systemd-pstore.service
+    else
+        # Same as systemd-pstore: copy each record to disk, then delete it so its UEFI variable is erased
+        mountpoint -q /sys/fs/pstore || mount -t pstore -o nosuid,nodev,noexec pstore /sys/fs/pstore 2>/dev/null
+        PSTORE_DEST=/var/lib/pstore/$(date +%Y%m%d-%H%M%S)
+        for f in /sys/fs/pstore/*; do
+            [ -f "$f" ] || continue
+            install -d -m 0700 "$PSTORE_DEST" && cp -p "$f" "$PSTORE_DEST/" && rm -f "$f"
+        done
+    fi
+} &
+
 # Wait for the jobs above, but never longer than ~30s
 for ((i = 0; i < 300; i++)); do
     [ -z "$(jobs -rp)" ] && break

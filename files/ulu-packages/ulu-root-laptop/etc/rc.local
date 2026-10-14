@@ -137,6 +137,29 @@ if [ "$TIME_SINCE_TRIM" -ge "$TRIM_INTERVAL" ]; then
     [ "$TRIMMED_ANY" -eq 1 ] && echo "$NOW" > "$TRIM_STAMP" 2>/dev/null
 fi
 
+# Logging: Volatile Journal (systemd only) and Pstore Crash Log Archival
+if [ -d /run/systemd/system ]; then
+    JOURNAL_CONF=/etc/systemd/journald.conf.d/90-ulu.conf
+    JOURNAL_WANT=$(printf '%s\n' \
+        '# Restored by /etc/rc.local at boot; override with a later file such as 99-local.conf' \
+        '[Journal]' \
+        'Storage=volatile' \
+        'RuntimeMaxUse=50M')
+    if [ "$(cat "$JOURNAL_CONF" 2>/dev/null)" != "$JOURNAL_WANT" ]; then
+        mkdir -p "${JOURNAL_CONF%/*}"
+        printf '%s\n' "$JOURNAL_WANT" > "$JOURNAL_CONF" && systemctl restart systemd-journald
+    fi
+    [ "$(systemctl is-enabled systemd-pstore.service 2>/dev/null)" = disabled ] && systemctl -q enable --no-reload systemd-pstore.service
+else
+    # Same as systemd-pstore: copy each record to disk, then delete it so its UEFI variable is erased
+    mountpoint -q /sys/fs/pstore || mount -t pstore -o nosuid,nodev,noexec pstore /sys/fs/pstore 2>/dev/null
+    PSTORE_DEST=/var/lib/pstore/$(date +%Y%m%d-%H%M%S)
+    for f in /sys/fs/pstore/*; do
+        [ -f "$f" ] || continue
+        install -d -m 0700 "$PSTORE_DEST" && cp -p "$f" "$PSTORE_DEST/" && rm -f "$f"
+    done
+fi
+
 # Security: Randomize Machine ID (not on systemd, whose journal is keyed to it)
 [ -d /run/systemd/system ] || {
     new_id=$(dbus-uuidgen 2>/dev/null)

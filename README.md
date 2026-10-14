@@ -154,6 +154,8 @@ Disk and SSD performance is tuned through scheduler and queue optimizations. NVM
 
 **F2FS:** Root and home partitions formatted with F2FS are optimized with background garbage collection enabled and tuned idle detection intervals to maintain flash-based storage performance consistency. To preserve SSD longevity and prevent write performance degradation, the system runs TRIM operations once every 7 days, reclaiming unused blocks. These processes ensure efficient resource use across F2FS filesystems.
 
+**Logging:** On systemd, the journal is kept in RAM (`Storage=volatile`, up to 50 MiB) instead of on disk, so logs from earlier boots are not kept; a later drop-in such as `/etc/systemd/journald.conf.d/99-local.conf` overrides this. Panic and oops logs the kernel saves in UEFI variables (pstore) are moved to disk at the next boot instead of accumulating in the firmware's NVRAM: to `/var/lib/systemd/pstore` by `systemd-pstore` on systemd, and to `/var/lib/pstore` by `rc.local` on other inits.
+
 ### CPU Architecture Detection & ALHP Package Integration
 CPU architecture is automatically detected on installation to ensure optimal package installation. The system integrates some of ALHP's packages, which provide architecture-specific builds optimized for modern processor capabilities while keeping the system's core system packages.
 
