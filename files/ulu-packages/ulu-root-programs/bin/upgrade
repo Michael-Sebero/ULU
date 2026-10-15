@@ -10,7 +10,8 @@ cleanup() {
     [ -d "/home/ulu-files" ] && rm -rf "/home/ulu-files"
     # Only reboot if installation was successful
     if [ $exit_code -eq 0 ] && [ "${INSTALL_COMPLETE:-0}" -eq 1 ]; then
-        echo "Installation complete. Rebooting..."
+        echo "Upgrade complete. Rebooting in 3 seconds..."
+        sleep 3
         reboot
     elif [ $exit_code -ne 0 ]; then
         echo "Installation failed. Please check the error messages above."
@@ -136,7 +137,7 @@ install_ulu_external_tools() {
 
         # The mode is set explicitly: hardening-script is committed without the executable bit.
         if clone_repo "$repo" "$tmp/$repo" && replace_file "$tmp/$repo/$file" "/bin/$file" 755; then
-            echo "Installed /bin/$file"
+            echo "Installed /bin/$file from $repo commit $(git -C "$tmp/$repo" rev-parse --short HEAD)"
         else
             echo "Failed to install $file from $repo, skipping..." >&2
             failed_tools+=("$file")
@@ -182,6 +183,7 @@ if ! clone_repo ULU "$ULU_DIR"; then
     echo "Failed to download ULU files"
     exit 1
 fi
+echo "ULU files from commit $(git -C "$ULU_DIR" rev-parse --short HEAD)"
 
 # Update external tools in /bin (a failed tool keeps its old version and does not stop the upgrade)
 TOOLS_FAILED=0
@@ -218,8 +220,10 @@ elif [ -d /etc/runlevels ]; then
 fi
 
 # fail2ban reads the journal on systemd; paths-overrides.local is only for other inits
+# daemon-reload picks up the rc-local.service drop-in that renews the machine ID at shutdown
 if [ -d /run/systemd/system ]; then
     rm -f /etc/fail2ban/paths-overrides.local
+    systemctl daemon-reload || true
 fi
 
 # Reset Permissions

@@ -5,6 +5,7 @@ su -c '
 ### ULU PACKAGE INSTALLATION ###
 
 ULU_PKG_DIR="/home/ulu-files/files/ulu-packages"
+ULU_FAILED=()
 
 replace_file() {
     local src="$1" dest="$2" mode="$3"
@@ -114,10 +115,11 @@ install_ulu_external_tools() {
 
         # The mode is set explicitly: hardening-script is committed without the executable bit.
         if [ "$cloned" = true ] && replace_file "$tmp/$repo/$file" "/bin/$file" 755; then
-            echo "Installed /bin/$file"
+            echo "Installed /bin/$file from $repo commit $(git -C "$tmp/$repo" rev-parse --short HEAD)"
         else
             echo "Failed to install $file from $repo, skipping..." >&2
             failed_tools+=("$file")
+            ULU_FAILED+=("$file")
         fi
     done
 
@@ -152,6 +154,51 @@ booster_image_ok() {
     [ "$STORAGE_OK" = true ] && bash "$BOOT_PARAMS" --check "$1" "$2" >/dev/null
 }
 
+# The kernels ULU installs on Arch/Artix and Debian-based systems are x86-64-v3 builds
+cpu_has_x86_64_v3() {
+    local flags f
+    flags=" $(grep -m1 "^flags" /proc/cpuinfo) "
+    for f in avx avx2 bmi1 bmi2 f16c fma abm movbe xsave; do
+        case "$flags" in
+            *" $f "*) ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+require_x86_64_v3() {
+    if ! cpu_has_x86_64_v3; then
+        echo "This CPU does not support x86-64-v3 (AVX2, BMI2, FMA, MOVBE), which the kernel ULU installs on this distribution requires. Nothing was changed." >&2
+        exit 1
+    fi
+}
+
+read_choice() {
+    while :; do
+        if ! read -r -p "Enter your choice (1-6): " choice; then
+            echo "No choice entered. Nothing was changed." >&2
+            exit 1
+        fi
+        case "$choice" in
+            [1-6]) return 0 ;;
+        esac
+        echo "Enter a number from 1 to 6." >&2
+    done
+}
+
+finish_install() {
+    cd /
+    rm -rf /home/ulu-files/
+    if [ "${#ULU_FAILED[@]}" -gt 0 ]; then
+        echo -e "\e[1mULU was installed, but these packages or tools did not install: ${ULU_FAILED[*]}\e[0m"
+    else
+        echo -e "\e[1mULU has been successfully installed\e[0m"
+    fi
+    echo "Rebooting in 3 seconds..."
+    sleep 3
+    reboot
+}
+
 if command -v pacman &>/dev/null; then
 
 ##############################
@@ -174,6 +221,8 @@ detect_distro() {
 }
 
 DISTRO=$(detect_distro)
+
+require_x86_64_v3
 
 ### RESOLVE INIT-SPECIFIC PACKAGE NAME ###
 
@@ -300,6 +349,7 @@ careful_install() {
         else
           echo "All 5 attempts failed for $pkg, skipping..." >&2
           failed_packages+=("$pkg")
+          ULU_FAILED+=("$pkg")
         fi
       fi
     done
@@ -310,6 +360,7 @@ careful_install() {
     for pkg in "${failed_packages[@]}"; do
       echo "  - $pkg" >&2
     done
+    return 1
   fi
 }
 
@@ -783,7 +834,7 @@ echo "4. INTEL-LAPTOP"
 echo "5. NVIDIA-OPENSOURCE-DESKTOP"
 echo "6. NVIDIA-PROPRIETARY-DESKTOP"
 
-read -p "Enter your choice (1-6): " choice
+read_choice
 
 # IMPORT KEYS
 echo -e "\e[1mImporting repository keys...\e[0m"
@@ -810,6 +861,7 @@ pacman-key --init
 pacman -Sy --noconfirm --needed git base-devel
 mkdir /home/ulu-files/
 git clone --depth 1 https://github.com/Michael-Sebero/ULU /home/ulu-files/
+echo "ULU files from commit $(git -C /home/ulu-files rev-parse --short HEAD)"
 cd /home/ulu-files/files/ulu-packages/
 if [ "$DISTRO" = "artix" ]; then
     pacman -Sy --noconfirm artix-archlinux-support pacman-contrib artix-keyring archlinux-keyring artix-mirrorlist archlinux-mirrorlist
@@ -931,7 +983,7 @@ done
 mv /home/ulu-files/files/ulu-manual/Manual /home/$USER/Desktop/
 
 # REMOVE PACKAGES
-for pkg in linux linux-headers pulseaudio pulseaudio-alsa pulseaudio-bluetooth pulseaudio-zeroconf nvidia-390xx-utils lib32-nvidia-390xx-utils modemmanager lib32-nvidia-580xx-utils; do
+for pkg in pulseaudio pulseaudio-alsa pulseaudio-bluetooth pulseaudio-zeroconf nvidia-390xx-utils lib32-nvidia-390xx-utils modemmanager lib32-nvidia-580xx-utils; do
     if pacman -Qi "$pkg" &>/dev/null; then
         paru -Rdd --noconfirm "$pkg"
     fi
@@ -1065,17 +1117,34 @@ if [ "$choice" = "5" ]; then
     nvidia-utils $(init_pkg nvidia-utils) nvidia-settings \
     fail2ban $(init_pkg fail2ban) cpupower $(init_pkg cpupower) nvidia-open-dkms
   # lib32 NVIDIA / Vulkan fallback
-  careful_install lib32-nvidia-utils || careful_install lib32-vulkan-driver
+  careful_install lib32-nvidia-utils
 fi
 
 # NVIDIA-PROPRIETARY-DESKTOP CHOICE
 if [ "$choice" = "6" ]; then
   careful_install \
     linux-xanmod-edge-x64v3 linux-xanmod-edge-x64v3-headers protonup-git \
-    nvidia-utils $(init_pkg nvidia-utils) nvidia-settings \
-    fail2ban $(init_pkg fail2ban) cpupower $(init_pkg cpupower) nvidia-dkms
+    nvidia-580xx-utils nvidia-580xx-settings \
+    fail2ban $(init_pkg fail2ban) cpupower $(init_pkg cpupower) nvidia-580xx-dkms
+  # Artix only: on systemd init_pkg returns nvidia-utils itself, which conflicts with nvidia-580xx-utils
+  [ "$INIT_SYSTEM" = "systemd" ] || careful_install "$(init_pkg nvidia-utils)"
   # lib32 NVIDIA / Vulkan fallback
-  careful_install lib32-nvidia-utils || careful_install lib32-vulkan-driver
+  careful_install lib32-nvidia-580xx-utils
+fi
+
+# REMOVE THE STOCK KERNEL ONCE THE VARIANT KERNEL IS INSTALLED
+case "$choice" in
+    2|4) ULU_KERNEL=linux-x64v3 ;;
+    *)   ULU_KERNEL=linux-xanmod-edge-x64v3 ;;
+esac
+if pacman -Qi "$ULU_KERNEL" &>/dev/null; then
+    for pkg in linux-headers linux; do
+        if pacman -Qi "$pkg" &>/dev/null; then
+            pacman -Rdd --noconfirm "$pkg"
+        fi
+    done
+else
+    echo "Warning: $ULU_KERNEL is not installed, keeping the existing linux kernel." >&2
 fi
 
 ### SWITCH INITRAMFS GENERATION FROM MKINITCPIO TO BOOSTER ###
@@ -1289,10 +1358,7 @@ reset-permissions
 hardening-script
 
 # EXIT
-cd /
-rm -rf /home/ulu-files/
-echo -e "\e[1mULU has been successfully installed\e[0m"
-reboot
+finish_install
 
 elif command -v xbps-install &>/dev/null; then
 
@@ -1337,6 +1403,7 @@ careful_install() {
         else
           echo "All 5 attempts failed for $pkg, skipping..." >&2
           failed_packages+=("$pkg")
+          ULU_FAILED+=("$pkg")
         fi
       fi
     done
@@ -1347,6 +1414,7 @@ careful_install() {
     for pkg in "${failed_packages[@]}"; do
       echo "  - $pkg" >&2
     done
+    return 1
   fi
 }
 
@@ -1681,13 +1749,14 @@ echo "4. INTEL-LAPTOP"
 echo "5. NVIDIA-OPENSOURCE-DESKTOP"
 echo "6. NVIDIA-PROPRIETARY-DESKTOP"
 
-read -p "Enter your choice (1-6): " choice
+read_choice
 
 ### FIRST COMMANDS AND ULU IMPORT P1 ###
 
 xbps-install -Syu git xbps
 mkdir -p /home/ulu-files/
 git clone --depth 1 https://github.com/Michael-Sebero/ULU /home/ulu-files/
+echo "ULU files from commit $(git -C /home/ulu-files rev-parse --short HEAD)"
 cd /home/ulu-files/files/ulu-packages/
 
 # ENABLE NONFREE + MULTILIB REPOS (needed for Steam, NVIDIA, 32-bit libs, etc.)
@@ -1935,10 +2004,7 @@ reset-permissions
 hardening-script
 
 # EXIT
-cd /
-rm -rf /home/ulu-files/
-echo -e "\e[1mULU has been successfully installed\e[0m"
-reboot
+finish_install
 
 else
 
@@ -1954,6 +2020,8 @@ if ! command -v apt-get &>/dev/null; then
     echo "Unsupported distribution. This section supports Linux Mint and Ubuntu." >&2
     exit 1
 fi
+
+require_x86_64_v3
 
 ### INIT SYSTEM ###
 
@@ -1989,6 +2057,7 @@ careful_install() {
                 else
                     echo "All 5 attempts failed for $pkg, skipping..." >&2
                     failed_packages+=("$pkg")
+                    ULU_FAILED+=("$pkg")
                 fi
             fi
         done
@@ -1999,6 +2068,7 @@ careful_install() {
         for pkg in "${failed_packages[@]}"; do
             echo "  - $pkg" >&2
         done
+        return 1
     fi
 }
 
@@ -2012,7 +2082,7 @@ echo "4. INTEL-LAPTOP"
 echo "5. NVIDIA-OPENSOURCE-DESKTOP"
 echo "6. NVIDIA-PROPRIETARY-DESKTOP"
 
-read -p "Enter your choice (1-6): " choice
+read_choice
 
 ### INITIAL SETUP & PREREQUISITE TOOLS ###
 
@@ -2035,6 +2105,7 @@ apt-get update
 
 mkdir -p /home/ulu-files/
 git clone --depth 1 https://github.com/Michael-Sebero/ULU /home/ulu-files/
+echo "ULU files from commit $(git -C /home/ulu-files rev-parse --short HEAD)"
 cd /home/ulu-files/files/ulu-packages/
 
 ### FULL SYSTEM UPDATE WITH RETRIES ###
@@ -2366,10 +2437,7 @@ reset-permissions
 hardening-script
 
 # EXIT
-cd /
-rm -rf /home/ulu-files/
-echo -e "\e[1mULU has been successfully installed\e[0m"
-reboot
+finish_install
 
 fi
 '

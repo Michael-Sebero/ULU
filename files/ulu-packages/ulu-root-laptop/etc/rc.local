@@ -2,6 +2,28 @@
 
 # Enter custom commands here. By default, they will be executed on startup in parallel with the other services
 
+# Security: Randomize Machine ID
+randomize_machine_id() {
+    local new_id f t tmp
+    local -A MID_DONE=()
+    new_id=$(dbus-uuidgen 2>/dev/null || systemd-id128 new 2>/dev/null)
+    [[ "$new_id" =~ ^[0-9a-f]{32}$ ]] || return 1
+    for f in /etc/machine-id /var/lib/dbus/machine-id; do
+        t=$(readlink -m "$f")
+        [ -d "${t%/*}" ] || continue
+        [ -n "${MID_DONE[$t]:-}" ] && continue
+        MID_DONE[$t]=1
+        tmp=$(mktemp "$t.XXXXXX") || continue
+        printf '%s\n' "$new_id" > "$tmp" && chmod 0444 "$tmp"
+        mv -f "$tmp" "$t" 2>/dev/null || { cat "$tmp" > "$t" 2>/dev/null; rm -f "$tmp"; }
+    done
+}
+
+if [ "$1" = stop ]; then
+    [ -d /run/systemd/system ] && randomize_machine_id
+    exit 0
+fi
+
 # System Security: Firewall Initialization
 ufw --force enable || true
 
@@ -160,22 +182,8 @@ else
     done
 fi
 
-# Security: Randomize Machine ID (not on systemd, whose journal is keyed to it)
-[ -d /run/systemd/system ] || {
-    new_id=$(dbus-uuidgen 2>/dev/null)
-    if [[ "$new_id" =~ ^[0-9a-f]{32}$ ]]; then
-        declare -A MID_DONE=()
-        for f in /etc/machine-id /var/lib/dbus/machine-id; do
-            t=$(readlink -m "$f")
-            [ -d "${t%/*}" ] || continue
-            [ -n "${MID_DONE[$t]:-}" ] && continue
-            MID_DONE[$t]=1
-            tmp=$(mktemp "$t.XXXXXX") || continue
-            printf '%s\n' "$new_id" > "$tmp" && chmod 0444 "$tmp"
-            mv -f "$tmp" "$t" 2>/dev/null || { cat "$tmp" > "$t" 2>/dev/null; rm -f "$tmp"; }
-        done
-    fi
-} &
+# Security: Randomize Machine ID (on systemd this happens at shutdown, see the top of this file)
+[ -d /run/systemd/system ] || randomize_machine_id &
 
 # Time Synchronization: NTP Sync and Hardware Clock Update
 (

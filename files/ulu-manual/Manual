@@ -14,15 +14,15 @@
 
  - If you want to update ULU to the newest version, run the command [ upgrade ]
 
- - ULU uses a machine ID randomizer on startup.
+ - ULU gives the system a new random machine ID at every boot.
 
- - All DNS traffic is encrypted through [ dnscrypt-proxy ] via LibreDNS, which prevents DNS leaks.
+ - System DNS queries go through dnsmasq to dnscrypt-proxy, which sends them encrypted to LibreDNS.
 
  - The [ steal ] command installs packages from the default repo, AUR and Flatpak. It can also download videos.
  
- - On laptops the maximum charge is 85% to preserve the battery.
+ - On laptops whose firmware supports TLP charge thresholds, charging starts below 75% and stops at 85%.
  
- - When connecting a charger to a laptop, system performance will increase when the battery is at 85%.
+ - On AC power, TLP switches laptops to its performance profile.
 
  - To get more FPS for games copy & paste [ gamemoderun %command% ] in launch options which is found through properties in Steam.
 
@@ -148,7 +148,8 @@
  
  . av
  
- - This command uses ClamAV to scan your whole system and automatically removes suspected malware.
+ - This command scans with ClamAV: home directories, /tmp, /bin, /var/tmp, /var/mail, /usr/local, /opt and /etc,
+   or all of / with [ av --full ]. Detected files are listed, and moved to /var/lib/antivirus/quarantine after you confirm.
 
 ..................................................................................................................................................
 

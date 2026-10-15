@@ -236,7 +236,7 @@ install_external_tools() {
 
         # The mode is set explicitly: these files are committed without the executable bit.
         if clone_repo "$repo" "$tmp/$repo" && install -D -m 755 "${own_args[@]}" "$tmp/$repo/$file" "$dest_dir/$file"; then
-            echo "Installed $dest_dir/$file"
+            echo "Installed $dest_dir/$file from $repo commit $(git -C "$tmp/$repo" rev-parse --short HEAD)"
         else
             echo "Failed to install $file from $repo, skipping..." >&2
             failed_tools+=("$file")
