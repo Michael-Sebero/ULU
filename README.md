@@ -8,7 +8,7 @@
 </p>
 
 ## Summary / TLDR
-ULU is a post-install script and a set of configuration files for Arch, Void and Debian-based distributions. It configures an existing installation for gaming, low latency and enhanced security by installing packages, replacing system configuration files and implementing a series of micro-optimizations.
+ULU is a post-installation script and configuration set for Arch, Void, and Debian-based Linux distributions. It configures existing installations for gaming, low-latency workloads and improved security by installing packages and applying configurations. Utility commands are included also which help manage the system.
 
 Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxyz/LARBS), which is why ULU's installer is script-based. If you want to see what changes I've made, the files ULU installs are in [files/ulu-packages](https://github.com/Michael-Sebero/ULU/tree/main/files/ulu-packages).
 
@@ -39,15 +39,15 @@ Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxy
 * [Proton GE](https://github.com/GloriousEggroll/proton-ge-custom) for Steam, installed with protonup
 * [Booster](https://github.com/anatol/booster) - Fast initramfs generator that replaces mkinitcpio and dracut
 * Battery life optimizations for laptops via [TLP](https://github.com/linrunner/TLP)
-* [Mimalloc](https://github.com/microsoft/mimalloc) - High-performance memory allocator, available to programs built against it or started with `LD_PRELOAD`
-* [Ephemeral Overlay](https://github.com/Michael-Sebero/Ephemeral-Overlay) - Keeps writes to `/etc` and `/var/log` in RAM and puts temporary and cache directories on TMPFS to reduce disk I/O
+* [Mimalloc](https://github.com/microsoft/mimalloc) - High-performance memory allocator
+* [Ephemeral Overlay](https://github.com/Michael-Sebero/Ephemeral-Overlay) - Frequently written directories are overlaid in OverlayFS/TMPFS to reduce disk I/O
 * [Real-time](https://gitlab.archlinux.org/archlinux/packaging/packages/realtime-privileges) scheduling privileges for low-latency audio
 * A [Lynis](https://github.com/CISOfy/lynis) system hardening rating of **78** (on the latest Lynis version)
 * [GameMode](https://github.com/FeralInteractive/gamemode) - Performance on demand utility for games
 * [NTSYNC](https://docs.kernel.org/userspace-api/ntsync.html) - Kernel driver for Windows NT synchronization primitives used by Wine/Proton, loaded at boot
-* [SCX](https://github.com/sched-ext/scx) - sched_ext scheduler collection, used as fallbacks for SCX-IMPERATOR
+* [SCX](https://github.com/sched-ext/scx) - Dynamic kernel scheduler framework
 * [Package Dictionary](https://github.com/Michael-Sebero/Package-Dictionary) - Package search across pacman, the AUR, xbps, apt and Flatpak
-* [Earlyoom](https://github.com/rfjakob/earlyoom) - Kills the process with the highest OOM score when available RAM drops below 15% and free swap below 5%
+* [Earlyoom](https://github.com/rfjakob/earlyoom) - Kills highest usage processes when RAM drops below 15% and free swap below 5%
 * [Nix](https://nixos.org/) - Universal package manager
 * [Limine](https://github.com/limine-bootloader/limine) - Fast boot loader, set as the default boot loader on Arch-based and Void systems
 
@@ -94,13 +94,13 @@ Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxy
 ULU's `sysctl.conf` and kernel command line restrict kernel features that are common attack paths.
 
 **Attack Surface Reduction:**
-- ptrace is blocked for every process, root included (`kernel.yama.ptrace_scope=3`), so debuggers such as gdb and strace don't work and the setting can't be lowered without a reboot. Laptops allow it for root only (`ptrace_scope=2`)
-- Unprivileged BPF is disabled (`kernel.unprivileged_bpf_disabled=1`) and the BPF JIT compiler is hardened (`net.core.bpf_jit_harden=1`)
-- Core dumps are discarded (`kernel.core_pattern=|/bin/false`) to prevent information leakage
-- Kernel pointers are hidden from all users (`kernel.kptr_restrict=2`)
-- SysRq is disabled (`kernel.sysrq=0`, `4` on laptops) and kexec is disabled (`kernel.kexec_load_disabled=1`) to prevent the running kernel from being replaced
-- Symlink, hardlink, FIFO and regular file protections are enabled (`fs.protected_*`)
-- AppArmor is enabled at boot (`lsm=capability,landlock,lockdown,yama,apparmor,bpf`)
+- ptrace is blocked for every process, root included, so debuggers such as gdb and strace don't work and the setting can't be lowered without a reboot. Laptops allow it for root only
+- Unprivileged BPF is disabled and the BPF JIT compiler is hardened
+- Core dumps are discarded to prevent information leakage
+- Kernel pointers are hidden from all users
+- SysRq is disabled and kexec is disabled to prevent the running kernel from being replaced
+- Symlink, hardlink, FIFO and regular file protections are enabled
+- AppArmor is enabled at boot
 
 ### Custom Kernel
 The kernel which comes with the desktop configuration is a custom build of XanMod tailored for [x86-64-v3](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels) CPU architecture. For laptops the default kernel is default but tailored for [x86-64-v3](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels), XanMod uses more energy which is why it's not used for this configuration. Linux's default scheduler is replaced with a SCX-based scheduler for improved performance and responsiveness.
@@ -111,12 +111,11 @@ The x86-64-v3 kernels need a CPU with AVX2, BMI2, FMA and MOVBE. Intel Core and 
 The desktop scheduler is set to `IMPERATOR` and laptops use `AURA`. `IMPERATOR` is specialized for new processors (Zen 4-5 or CPUs with 3D V-Cache) and `AURA` for low latency and responsiveness with long battery life. The prebuilt `scx_imperator` binary needs AVX-512, so on CPUs without it, such as AMD Ryzen before Zen 4 (including Zen 3 X3D models) and most Intel desktop CPUs. If you want to change the scheduler, it can be modified in `rc.local` under the scheduler section.
 
 ### Memory Management
-RAM usage has the highest priority over swapping (`vm.swappiness=1`). Keeping active data in memory reduces wear on the drive and increases system responsiveness. Swapping is still possible but only used when RAM is nearly full, first to ZRAM and then to any swap on disk. Proactive memory compaction is turned off (`vm.compaction_proactiveness=0`) and `vm.vfs_cache_pressure=50` keeps directory and inode caches in memory longer. 16 HugePages (2 MB each) are reserved at boot and up to 3968 more are allocated on demand for programs that request them.
+RAM usage has the highest priority over swapping. Keeping active data in memory reduces wear on the drive and increases system responsiveness. Swapping is still possible but only used when RAM is nearly full, first to ZRAM and then to any swap on disk. Proactive memory compaction is turned off and keeps directory and inode caches in memory longer. 16 HugePages (2 MB each) are reserved at boot and up to 3968 more are allocated on demand for programs that request them.
 
 **ZRAM Integration:** `rc.local` sets up a compressed swap device in RAM, sized at 25% of total RAM and compressed with [LZ4](https://lz4.org/) on desktops and zstd on laptops. It is enabled with a higher priority than swap on disk and Zswap is turned off once it is active so pages aren't compressed twice.
 
 ### Ephemeral Overlay
-Desktop variants only. Laptops don't run it, because hibernation can interfere with its syncing to disk.
 
 **Tmpfs Mounts:**
 - `/tmp` - 5 GB (stays on disk if an X server is already running when the overlay starts)
@@ -160,25 +159,23 @@ Disk and SSD performance is tuned through scheduler and queue optimizations. NVM
 
 **TRIM:** `rc.local` runs `fstrim` on ext4, XFS, Btrfs and F2FS filesystems whose device supports discard (also through LUKS or LVM when discards are passed through) if the last successful TRIM was at least 7 days ago. This reclaims unused blocks to preserve SSD longevity and prevent write performance degradation.
 
-**Logging:** On systemd, the journal is kept in RAM (`Storage=volatile`, up to 50 MiB) instead of on disk, so logs from earlier boots are not kept; a later drop-in such as `/etc/systemd/journald.conf.d/99-local.conf` overrides this. Panic and oops logs the kernel saves in UEFI variables (pstore) are moved to disk at the next boot instead of accumulating in the firmware's NVRAM: to `/var/lib/systemd/pstore` by `systemd-pstore` on systemd and to `/var/lib/pstore` by `rc.local` on other inits.
+**Logging:** On systemd, the journal is kept in RAM instead of on disk, so logs from earlier boots are not kept; a later drop-in such as `/etc/systemd/journald.conf.d/99-local.conf` overrides this. Panic and oops logs the kernel saves in UEFI variables (pstore) are moved to disk at the next boot instead of accumulating in the firmware's NVRAM: to `/var/lib/systemd/pstore` by `systemd-pstore` on systemd and to `/var/lib/pstore` by `rc.local` on other inits.
 
 ### CPU Architecture Detection & ALHP Package Integration
 On Arch-based systems, the installer detects whether the CPU supports x86-64-v3 or v4 and adds the matching ALHP repositories, which provide Arch packages rebuilt for those levels. They take priority over core, extra and multilib on Arch and over Arch's extra and multilib on Artix, whose own repositories stay as they are. Packages ALHP doesn't rebuild still come from the standard repositories.
 
 ## Optional Workload-Specific Presets
-The presets below can be chosen by running the `optional` command post-installation. Each one replaces `sysctl.conf`. Performance and LLM also replace `/etc/default/grub` and remove security features, including uninstalling UFW, AppArmor and Fail2Ban on Arch-based systems. `optional` also offers extra programs, dotfiles, a high-quality audio configuration, a 20 GB swap file and LACT for AMD GPU overclocking.
+The presets below can be chosen by running the `optional` command post-installation.
 
 ### Performance
-Maximum performance configuration: CPU vulnerability mitigations, ASLR, KASLR, the Linux security modules (AppArmor, Yama, Landlock) and kernel auditing are turned off and kernel limits such as inotify watches and IPC message sizes are raised. A separate AMD version adds AMD-specific kernel parameters and environment variables.
+**Maximum performance:** CPU vulnerability mitigations, ASLR, KASLR, all the Linux security modules and kernel auditing are turned off and kernel limits such as inotify watches and IPC message sizes are raised. A separate AMD version adds AMD-specific kernel parameters and environment variables.
 
 ### Server
-Small-scale NAS and hosting configuration: a server-oriented `sysctl.conf`, with ZFS loaded at boot (`zfs-dkms-git`, Arch-based systems).
+**Small-scale NAS and hosting:** a server-oriented `sysctl.conf`, with ZFS loaded at boot.
 
 ### LLM
-Specialized for LLM workloads: unlimited locked memory and memory overcommit, with CPU vulnerability mitigations and the Linux security modules turned off.
+**LLM workloads:** unlimited locked memory and memory overcommit, with CPU vulnerability mitigations and the Linux security modules turned off.
 
 ## Contact and Donations
 * [Email](mailto:michaelsebero@disroot.org)
 * [PayPal](https://www.paypal.com/donate/?cmd=_donations&business=YYGU9JWJEE2AG)
-
-**Est. 2022**
