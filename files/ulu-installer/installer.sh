@@ -173,16 +173,51 @@ require_x86_64_v3() {
     fi
 }
 
+# NVIDIA display controllers by PCI device ID: 0x1e00 and up are Turing or newer (open kernel modules),
+# 0x1340-0x1dff Maxwell, Pascal or Volta (580 legacy branch), anything lower Kepler or older (no current driver)
+nvidia_gpu_class() {
+    local dev vendor class_id id gen=""
+    for dev in /sys/bus/pci/devices/*; do
+        read -r vendor 2>/dev/null < "$dev/vendor" || continue
+        read -r class_id 2>/dev/null < "$dev/class" || continue
+        read -r id 2>/dev/null < "$dev/device" || continue
+        [ "$vendor" = 0x10de ] || continue
+        case "$class_id" in
+            0x0300*|0x0302*) ;;
+            *) continue ;;
+        esac
+        # With several NVIDIA GPUs the 580 branch wins: its proprietary modules also drive Turing through Ada
+        if [ $((id)) -ge $((0x1e00)) ]; then
+            [ "$gen" = 580 ] || gen=open
+        elif [ $((id)) -ge $((0x1340)) ]; then
+            gen=580
+        else
+            [ -n "$gen" ] || gen=legacy
+        fi
+    done
+    echo "$gen"
+}
+
 read_choice() {
     while :; do
-        if ! read -r -p "Enter your choice (1-6): " choice; then
+        if ! read -r -p "Enter your choice (1-5): " choice; then
             echo "No choice entered. Nothing was changed." >&2
             exit 1
         fi
         case "$choice" in
-            [1-6]) return 0 ;;
+            [1-4]) return 0 ;;
+            5)
+                NVIDIA_GPU=$(nvidia_gpu_class)
+                case "$NVIDIA_GPU" in
+                    open) echo "NVIDIA GPU detected (Turing or newer, such as GTX 16 and RTX cards): installing the open kernel modules"; return 0 ;;
+                    580) echo "NVIDIA GPU detected (Maxwell, Pascal or Volta, such as GTX 900 and 10 series cards): installing the 580 legacy driver"; return 0 ;;
+                    legacy) echo "NVIDIA GPU detected (Kepler or older), which current NVIDIA drivers do not support: keeping the open-source nouveau driver"; return 0 ;;
+                esac
+                echo "No NVIDIA GPU was found. Choose another variant." >&2
+                continue
+                ;;
         esac
-        echo "Enter a number from 1 to 6." >&2
+        echo "Enter a number from 1 to 5." >&2
     done
 }
 
@@ -831,8 +866,7 @@ echo "1. AMD-DESKTOP"
 echo "2. AMD-LAPTOP"
 echo "3. INTEL-DESKTOP"
 echo "4. INTEL-LAPTOP"
-echo "5. NVIDIA-OPENSOURCE-DESKTOP"
-echo "6. NVIDIA-PROPRIETARY-DESKTOP"
+echo "5. NVIDIA-DESKTOP"
 
 read_choice
 
@@ -1110,26 +1144,30 @@ if [ "$choice" = "4" ]; then
     tlp $(init_pkg tlp) blueman bluez $(init_pkg bluez) brightnessctl
 fi
 
-# NVIDIA-OPENSOURCE-DESKTOP CHOICE
+# NVIDIA-DESKTOP CHOICE
+# Driver for the GPU read_choice detected; the other branch is removed first because the two conflict
 if [ "$choice" = "5" ]; then
   careful_install \
     linux-xanmod-edge-x64v3 linux-xanmod-edge-x64v3-headers protonup-git \
-    nvidia-utils $(init_pkg nvidia-utils) nvidia-settings \
-    fail2ban $(init_pkg fail2ban) cpupower $(init_pkg cpupower) nvidia-open-dkms
-  # lib32 NVIDIA / Vulkan fallback
-  careful_install lib32-nvidia-utils
-fi
-
-# NVIDIA-PROPRIETARY-DESKTOP CHOICE
-if [ "$choice" = "6" ]; then
-  careful_install \
-    linux-xanmod-edge-x64v3 linux-xanmod-edge-x64v3-headers protonup-git \
-    nvidia-580xx-utils nvidia-580xx-settings \
-    fail2ban $(init_pkg fail2ban) cpupower $(init_pkg cpupower) nvidia-580xx-dkms
-  # Artix only: on systemd init_pkg returns nvidia-utils itself, which conflicts with nvidia-580xx-utils
-  [ "$INIT_SYSTEM" = "systemd" ] || careful_install "$(init_pkg nvidia-utils)"
-  # lib32 NVIDIA / Vulkan fallback
-  careful_install lib32-nvidia-580xx-utils
+    fail2ban $(init_pkg fail2ban) cpupower $(init_pkg cpupower)
+  case "$NVIDIA_GPU" in
+    open)
+      for pkg in nvidia-580xx-dkms nvidia-580xx-utils nvidia-580xx-settings lib32-nvidia-580xx-utils opencl-nvidia-580xx lib32-opencl-nvidia-580xx; do
+        pacman -Qq "$pkg" &>/dev/null && pacman -Rdd --noconfirm "$pkg"
+      done
+      careful_install nvidia-utils $(init_pkg nvidia-utils) nvidia-settings nvidia-open-dkms
+      careful_install lib32-nvidia-utils
+      ;;
+    580)
+      for pkg in nvidia-open-dkms nvidia-open nvidia-dkms nvidia nvidia-lts nvidia-utils nvidia-settings lib32-nvidia-utils opencl-nvidia lib32-opencl-nvidia; do
+        pacman -Qq "$pkg" &>/dev/null && pacman -Rdd --noconfirm "$pkg"
+      done
+      careful_install nvidia-580xx-utils nvidia-580xx-settings nvidia-580xx-dkms
+      # Artix only: on systemd init_pkg returns nvidia-utils itself, which conflicts with nvidia-580xx-utils
+      [ "$INIT_SYSTEM" = "systemd" ] || careful_install "$(init_pkg nvidia-utils)"
+      careful_install lib32-nvidia-580xx-utils
+      ;;
+  esac
 fi
 
 # REMOVE THE STOCK KERNEL ONCE THE VARIANT KERNEL IS INSTALLED
@@ -1222,7 +1260,7 @@ if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
 fi
 
 # NVIDIA SELECTION
-if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
+if [ "$choice" = "5" ]; then
   install_ulu_package ulu-root-main
   install_ulu_package ulu-root-programs
   install_ulu_package ulu-nvidia-patch
@@ -1263,7 +1301,7 @@ grub-mkconfig -o /boot/grub/grub.cfg
 install_limine
 
 # CREATE GAMEMODE GROUP
-if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
+if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ]; then
   groupadd -f gamemode
   TARGET_USER=$USER
   if [ "$TARGET_USER" = "root" ]; then
@@ -1746,8 +1784,7 @@ echo "1. AMD-DESKTOP"
 echo "2. AMD-LAPTOP"
 echo "3. INTEL-DESKTOP"
 echo "4. INTEL-LAPTOP"
-echo "5. NVIDIA-OPENSOURCE-DESKTOP"
-echo "6. NVIDIA-PROPRIETARY-DESKTOP"
+echo "5. NVIDIA-DESKTOP"
 
 read_choice
 
@@ -1838,18 +1875,24 @@ if [ "$choice" = "4" ]; then
     tlp blueman bluez brightnessctl
 fi
 
-# NVIDIA-OPENSOURCE-DESKTOP CHOICE
+# NVIDIA-DESKTOP CHOICE
+# Driver for the GPU read_choice detected; the other branch is removed first because the two conflict
 if [ "$choice" = "5" ]; then
-  careful_install \
-    nvidia nvidia-libs-32bit \
-    fail2ban cpupower
-fi
-
-# NVIDIA-PROPRIETARY-DESKTOP CHOICE
-if [ "$choice" = "6" ]; then
-  careful_install \
-    nvidia580 nvidia580-libs-32bit \
-    fail2ban cpupower
+  careful_install fail2ban cpupower
+  case "$NVIDIA_GPU" in
+    open)
+      for pkg in nvidia580 nvidia580-libs nvidia580-libs-32bit nvidia580-dkms nvidia580-gtklibs nvidia580-opencl nvidia580-firmware; do
+        xbps-query "$pkg" &>/dev/null && xbps-remove -Fy "$pkg"
+      done
+      careful_install nvidia nvidia-libs-32bit
+      ;;
+    580)
+      for pkg in nvidia nvidia-libs nvidia-libs-32bit nvidia-dkms nvidia-gtklibs nvidia-opencl nvidia-firmware; do
+        xbps-query "$pkg" &>/dev/null && xbps-remove -Fy "$pkg"
+      done
+      careful_install nvidia580 nvidia580-libs-32bit
+      ;;
+  esac
 fi
 
 ### KEEP GPU DRIVERS OUT OF BOOSTER ###
@@ -1920,7 +1963,7 @@ if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
 fi
 
 # NVIDIA SELECTION
-if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
+if [ "$choice" = "5" ]; then
   install_ulu_package ulu-root-main
   install_ulu_package ulu-root-programs
   install_ulu_package ulu-nvidia-patch
@@ -1978,7 +2021,7 @@ grub-mkconfig -o /boot/grub/grub.cfg
 install_limine
 
 # CREATE GAMEMODE GROUP
-if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
+if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ]; then
   groupadd -f gamemode
   TARGET_USER=$USER
   if [ "$TARGET_USER" = "root" ]; then
@@ -2079,8 +2122,7 @@ echo "1. AMD-DESKTOP"
 echo "2. AMD-LAPTOP"
 echo "3. INTEL-DESKTOP"
 echo "4. INTEL-LAPTOP"
-echo "5. NVIDIA-OPENSOURCE-DESKTOP"
-echo "6. NVIDIA-PROPRIETARY-DESKTOP"
+echo "5. NVIDIA-DESKTOP"
 
 read_choice
 
@@ -2249,28 +2291,21 @@ if [ "$choice" = "4" ]; then
     careful_install mesa-vulkan-drivers mesa-vulkan-drivers:i386 vainfo tlp tlp-rdw blueman bluez brightnessctl
 fi
 
-# NVIDIA-OPENSOURCE-DESKTOP CHOICE
+# NVIDIA-DESKTOP CHOICE
+# ubuntu-drivers picks the driver branch that supports the GPU; Turing and newer get its -open build
 if [ "$choice" = "5" ]; then
     install_xanmod_kernel edge
-    apt-get install -y --no-install-recommends ubuntu-drivers-common 2>/dev/null || true
-    RECOMMENDED_DRIVER=$(ubuntu-drivers devices 2>/dev/null | awk "/recommended/{print \$3}" | head -n1)
-    if [ -n "$RECOMMENDED_DRIVER" ]; then
-        careful_install "${RECOMMENDED_DRIVER}-open" || careful_install "$RECOMMENDED_DRIVER"
-    else
-        ubuntu-drivers autoinstall || true
-    fi
-    careful_install vainfo fail2ban linux-tools-common linux-tools-generic
-fi
-
-# NVIDIA-PROPRIETARY-DESKTOP CHOICE
-if [ "$choice" = "6" ]; then
-    install_xanmod_kernel edge
-    apt-get install -y --no-install-recommends ubuntu-drivers-common 2>/dev/null || true
-    RECOMMENDED_DRIVER=$(ubuntu-drivers devices 2>/dev/null | awk "/recommended/{print \$3}" | head -n1)
-    if [ -n "$RECOMMENDED_DRIVER" ]; then
-        careful_install "$RECOMMENDED_DRIVER"
-    else
-        ubuntu-drivers autoinstall || true
+    if [ "$NVIDIA_GPU" != legacy ]; then
+        apt-get install -y --no-install-recommends ubuntu-drivers-common 2>/dev/null || true
+        RECOMMENDED_DRIVER=$(ubuntu-drivers devices 2>/dev/null | awk "/recommended/{print \$3}" | head -n1)
+        RECOMMENDED_DRIVER=${RECOMMENDED_DRIVER%-open}
+        if [ -z "$RECOMMENDED_DRIVER" ]; then
+            ubuntu-drivers autoinstall || true
+        elif [ "$NVIDIA_GPU" = open ]; then
+            careful_install "${RECOMMENDED_DRIVER}-open" || careful_install "$RECOMMENDED_DRIVER"
+        else
+            careful_install "$RECOMMENDED_DRIVER"
+        fi
     fi
     careful_install vainfo fail2ban linux-tools-common linux-tools-generic
 fi
@@ -2303,7 +2338,7 @@ if [ "$choice" = "2" ] || [ "$choice" = "4" ]; then
 fi
 
 # NVIDIA SELECTION
-if [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
+if [ "$choice" = "5" ]; then
     install_ulu_package ulu-root-main
     install_ulu_package ulu-root-programs
     install_ulu_package ulu-nvidia-patch
@@ -2411,7 +2446,7 @@ run_boot_params
 update-grub 2>/dev/null || true
 
 # CREATE GAMEMODE GROUP
-if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ] || [ "$choice" = "6" ]; then
+if [ "$choice" = "1" ] || [ "$choice" = "3" ] || [ "$choice" = "5" ]; then
     groupadd -f gamemode
     TARGET_USER=$USER
     if [ "$TARGET_USER" = "root" ]; then
