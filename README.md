@@ -8,7 +8,7 @@
 </p>
 
 ## Summary / TLDR
-ULU is a post-installation script and configuration set for Arch, Void, and Debian-based Linux distributions. It configures existing installations for gaming, low-latency workloads and improved security by installing packages and applying configurations. Utility commands are included also which help manage the system.
+ULU is a post-installation script and configuration set for Arch, Void, and Debian-based Linux distributions. It configures the existing OS for gaming, low-latency workloads and improved security by installing packages and applying configurations. Utility commands are included also which help manage the system.
 
 Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxyz/LARBS), which is why ULU's installer is script-based. If you want to see what changes I've made, the files ULU installs are in [files/ulu-packages](https://github.com/Michael-Sebero/ULU/tree/main/files/ulu-packages).
 
@@ -16,7 +16,7 @@ Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxy
 
 ### **High Performance Kernel & Schedulers**
 * [XanMod](https://xanmod.org/) - Custom Linux kernel optimized for speed, responsiveness and desktop performance
-* [SCX-AURA](https://github.com/Michael-Sebero/SCX-AURA) - Laptop CPU scheduler based on [scx_bpfland](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland)
+* [SCX-AURA](https://github.com/Michael-Sebero/SCX-AURA) - Laptop CPU scheduler based on [scx_bpfland](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland) and inspired by the [XNU](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/sched_clutch.c) scheduler
 * [SCX-IMPERATOR](https://github.com/Michael-Sebero/SCX-IMPERATOR) - Gaming CPU scheduler based on [scx_cake](https://github.com/RitzDaCat/scx_cake) and [scx_lavd](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_lavd)
 
 ### **Security Software**
