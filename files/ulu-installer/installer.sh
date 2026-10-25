@@ -359,8 +359,6 @@ write_pacman_conf() {
             printf '\''[%s]\nInclude = %s\n\n'\'' "$repo" "$base_mirrorlist"
         done
 
-        [ "$distro" = "artix" ] && printf '\''[auris]\nSigLevel = Required\nServer = https://auris.artixlinux.org/api/packages/auris/arch/$repo/$arch\n\n'\''
-
         printf '\''[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist\n'\''
     } > /etc/pacman.conf
 }
@@ -880,14 +878,6 @@ curl -s https://raw.githubusercontent.com/chaotic-aur/.github/refs/heads/main/pr
 | sed "s/--recv-key \([0-9A-F]*\)/--recv-key \1; pacman-key --lsign-key \1/" \
 | bash
 
-# AURIS
-if [ "$DISTRO" = "artix" ]; then
-    curl https://auris.artixlinux.org/api/packages/auris/arch/repository.key -o repository.key
-    gpg --show-keys repository.key
-    pacman-key --add repository.key
-    pacman-key --lsign-key 74E5750C4A3C00F037070EF2357B525A97500B9F
-fi
-
 ### FIRST COMMANDS AND ULU IMPORT P1 ###
 
 # INITIALIZE KEYRING (must run before any pacman/paru call that checks signatures)
@@ -934,7 +924,6 @@ CPU_LEVEL=$(detect_cpu_level)
 echo "Configuring pacman repos (distro: $DISTRO, CPU level: ${CPU_LEVEL:-baseline}, ALHP repos available: $alhp_ok)..."
 
 repo_label="chaotic-aur"
-[ "$DISTRO" = "artix" ] && repo_label="chaotic-aur/auris"
 
 if [ -z "$CPU_LEVEL" ]; then
     echo "CPU is below x86-64-v3 — writing a baseline config with $repo_label but no ALHP repos." >&2
