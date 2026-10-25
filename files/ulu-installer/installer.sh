@@ -82,7 +82,8 @@ check_ulu_install() {
 
 ULU_EXTERNAL_TOOLS=(
     "Package-Dictionary:pd"
-    "SCX-IMPERATOR:scx_imperator"
+    "SCX-IMPERATOR:scx_imperator_z4"
+    "SCX-IMPERATOR:scx_imperator_z5"
     "SCX-AURA:scx_aura"
     "Linux-Hardening-Script:hardening-script"
     "Ephemeral-Overlay:ephemeral-overlay"

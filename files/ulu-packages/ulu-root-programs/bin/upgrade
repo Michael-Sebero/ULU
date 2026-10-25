@@ -37,7 +37,8 @@ ULU_PKG_DIR="$ULU_DIR/files/ulu-packages"
 # Tools cloned from GitHub and sent to /bin, overwriting the old versions ("Repo:file")
 ULU_EXTERNAL_TOOLS=(
     "Package-Dictionary:pd"
-    "SCX-IMPERATOR:scx_imperator"
+    "SCX-IMPERATOR:scx_imperator_z4"
+    "SCX-IMPERATOR:scx_imperator_z5"
     "SCX-AURA:scx_aura"
     "Linux-Hardening-Script:hardening-script"
     "Ephemeral-Overlay:ephemeral-overlay"

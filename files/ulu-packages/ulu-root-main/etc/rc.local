@@ -93,7 +93,7 @@ fi
         done
     }
     if [ -e /sys/kernel/sched_ext/state ]; then
-        start_scx scx_imperator || start_scx scx_cake || start_scx scx_lavd --performance || start_scx scx_rusty
+        start_scx scx_imperator_z5 || start_scx scx_imperator_z4 || start_scx scx_cake || start_scx scx_lavd --performance || start_scx scx_rusty
     fi
 } &
 
