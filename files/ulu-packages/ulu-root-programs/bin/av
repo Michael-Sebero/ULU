@@ -36,11 +36,19 @@ QUARANTINED_COUNT=0
 DELETED_COUNT=0
 ENGINE_USED=""
 THREADS_USED=""
+CPU_MODEL=""
+CPU_THREADS=1
+WORKERS=1
 IONICE=()
 RENICE=()
 
 declare -A CACHE_SEEN
 declare -A INFECTED_SET
+
+# Progress display (see "Progress display" below)
+IS_TTY=0
+[[ -t 1 && "${TERM:-dumb}" != "dumb" ]] && IS_TTY=1
+HB_PID=""
 
 print_help() {
     cat <<'EOF'
@@ -59,8 +67,8 @@ Options:
   --quick               Scan common hotspots (default): home dirs, tmp,
                         mail spool, /etc, /opt, /usr/local, /bin
   --full                Scan the whole root filesystem (/)
-  --threads N           Use N parallel workers (default: auto, based on
-                        CPU count and whether the disk is SSD or HDD)
+  --threads N           Use N parallel workers (default: auto-detect the
+                        CPU and use every thread it has)
   --aggressive          Realtime IO priority + top CPU priority. Faster,
                         but can make the rest of the system sluggish.
   --delete              Permanently delete infected files (default is
@@ -87,6 +95,153 @@ log() {
     msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
     [[ -n "${LOGFILE:-}" ]] && echo "$msg" >> "$LOGFILE"
+}
+
+# Like log(), but only to the log file (not the screen).
+logfile_only() {
+    [[ -n "${LOGFILE:-}" ]] && echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGFILE"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+# Progress display
+#
+# Slow steps run next to a small background "heartbeat" that redraws one
+# status line every second, so nothing ever looks frozen. On a terminal it
+# is an in-place line; with no terminal (cron, a pipe, tee) it falls back to
+# a plain log line every 30 seconds. A copy also goes to the log file once a
+# minute, so `tail -f` on the log shows progress too.
+# ---------------------------------------------------------------------
+fmt_secs() {
+    local s=$1
+    if (( s >= 3600 )); then
+        printf '%dh%02dm%02ds' $(( s / 3600 )) $(( s % 3600 / 60 )) $(( s % 60 ))
+    elif (( s >= 60 )); then
+        printf '%dm%02ds' $(( s / 60 )) $(( s % 60 ))
+    else
+        printf '%ds' "$s"
+    fi
+}
+
+# count_done: sets COUNT_DONE to the number of files finished so far, i.e. the
+# number of result lines the scanners have written to $WORKDIR/*.scan (one
+# line per file). Only the bytes added since the previous call are read, so
+# it stays cheap on huge scans. It sets a variable instead of printing so the
+# offsets survive between calls.
+declare -A CD_OFF CD_N
+COUNT_DONE=0
+count_done() {
+    local f size off n total=0
+    for f in "$WORKDIR"/*.scan; do
+        [[ -e "$f" ]] || continue
+        size=$(stat -c %s "$f" 2>/dev/null) || continue
+        off=${CD_OFF[$f]:-0}
+        n=${CD_N[$f]:-0}
+        if (( size > off )); then
+            n=$(( n + $(tail -c +$(( off + 1 )) "$f" | head -c $(( size - off )) | wc -l) ))
+            CD_OFF[$f]=$size
+            CD_N[$f]=$n
+        fi
+        total=$(( total + n ))
+    done
+    COUNT_DONE=$total
+}
+
+# hb_line LABEL ELAPSED_SECS [DONE TOTAL]  ->  one status line, no newline
+hb_line() {
+    local label="$1" elapsed="$2" done_n="${3:-0}" total="${4:-0}"
+    if (( total <= 0 )); then
+        printf '%s... %s' "$label" "$(fmt_secs "$elapsed")"
+        return 0
+    fi
+    (( done_n > total )) && done_n=$total
+    local pm=$(( done_n * 1000 / total )) rate=0 eta="estimating..." bar="" i d t r
+    (( elapsed > 0 )) && rate=$(( done_n / elapsed ))
+    (( elapsed >= 3 && done_n > 0 )) && eta="~$(fmt_secs $(( (total - done_n) * elapsed / done_n )))"
+    for (( i = 0; i < 20; i++ )); do
+        if (( i < pm / 50 )); then bar+="#"; else bar+="-"; fi
+    done
+    printf -v d "%'d" "$done_n"
+    printf -v t "%'d" "$total"
+    printf -v r "%'d" "$rate"
+    printf '%s [%s] %d.%d%%  %s/%s files  ETA %s  (%s files/s, elapsed %s)' \
+        "$label" "$bar" $(( pm / 10 )) $(( pm % 10 )) "$d" "$t" "$eta" "$r" "$(fmt_secs "$elapsed")"
+}
+
+# hb_start LABEL [TOTAL]
+#   With TOTAL: a progress bar driven by count_done.
+#   Without:    just the label and the elapsed time.
+# Always pair with hb_stop (the EXIT trap in main() also calls it).
+hb_start() {
+    local label="$1" total="${2:-0}"
+    hb_stop
+    local parent=$$ cols=80
+    if (( IS_TTY )); then
+        cols=$(tput cols 2>/dev/null) || cols=80
+        [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+        (( cols >= 20 )) || cols=80
+    fi
+    (
+        trap - EXIT
+        local t0=$SECONDS n=0 frame=0 last_log=$SECONDS plain line
+        local frames=$'|/-\\'
+        # The kill -0 check means a heartbeat can never outlive the script,
+        # even if the script is killed outright.
+        while kill -0 "$parent" 2>/dev/null; do
+            sleep 1
+            if (( total > 0 )); then
+                count_done
+                (( COUNT_DONE > n )) && n=$COUNT_DONE
+            fi
+            plain=$(hb_line "$label" $(( SECONDS - t0 )) "$n" "$total")
+            if (( IS_TTY )); then
+                line="${frames:frame++ % 4:1} $plain"
+                printf '\r\033[K%s' "${line:0:cols-1}"
+                if (( SECONDS - last_log >= 60 )); then
+                    logfile_only "$plain"
+                    last_log=$SECONDS
+                fi
+            elif (( SECONDS - last_log >= 30 )); then
+                log "$plain"
+                last_log=$SECONDS
+            fi
+        done
+    ) &
+    HB_PID=$!
+}
+
+hb_stop() {
+    [[ -n "${HB_PID:-}" ]] || return 0
+    { kill "$HB_PID" && wait "$HB_PID"; } 2>/dev/null
+    HB_PID=""
+    (( IS_TTY )) && printf '\r\033[K'
+    return 0
+}
+
+# The scanners write one "path: RESULT" line per file to $WORKDIR/*.scan.
+# Nothing sits in the data path, so progress tracking can't slow a scan down.
+# Afterwards, keep only what matters: infected files (FOUND) go to
+# $INFECTED_RAW and per-file errors go to the log; the rest is dropped.
+collect_scan_results() {
+    grep -h ' FOUND$' "$WORKDIR"/*.scan > "$INFECTED_RAW" 2>/dev/null
+    grep -h ' ERROR$' "$WORKDIR"/*.scan 2>/dev/null | sed 's/^/  scan error: /' >> "$LOGFILE"
+    rm -f "$WORKDIR"/*.scan
+}
+
+# report_scan TOTAL START_SECONDS  - one-line result after a scan finishes
+# (call it before collect_scan_results, which deletes the result files)
+report_scan() {
+    local total="$1" t0="$2" done_n elapsed rate_txt="" d t
+    count_done
+    done_n=$COUNT_DONE
+    elapsed=$(( SECONDS - t0 ))
+    (( elapsed > 0 )) && rate_txt=" ($(( done_n / elapsed )) files/s)"
+    printf -v d "%'d" "$done_n"
+    printf -v t "%'d" "$total"
+    log "Scan finished: $d of $t file(s) checked in $(fmt_secs "$elapsed")${rate_txt}."
+    if (( done_n * 10 < total * 9 )); then
+        log "WARNING: the scanner only reported on $d of $t files, so this scan may be incomplete. Check $LOGFILE and $LOG_DIR/clamd.log."
+    fi
 }
 
 require_root() {
@@ -119,38 +274,36 @@ check_deps() {
     command -v freshclam >/dev/null 2>&1 && HAVE_FRESHCLAM=1
 }
 
-is_rotational() {
-    local path="${1:-/}" src base
-    src=$(df --output=source "$path" 2>/dev/null | tail -n1)
-    if [[ -z "$src" || "$src" == "none" ]]; then
-        echo 1   # unknown -> assume HDD, be conservative
-        return
+# detect_cpu: finds out what CPU this machine has and how many threads it can
+# run at once. Sets CPU_MODEL and CPU_THREADS. "Threads" means logical CPUs
+# (hyper-threads / SMT siblings count), which is what the scanner can really
+# run in parallel. nproc goes first because it respects CPU affinity and
+# cpusets; the OMP_* variables are unset because nproc would otherwise report
+# their value instead of the real count.
+detect_cpu() {
+    local n=""
+    n=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc 2>/dev/null)
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=$(getconf _NPROCESSORS_ONLN 2>/dev/null)
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
+    CPU_THREADS=$n
+
+    CPU_MODEL=""
+    if command -v lscpu >/dev/null 2>&1; then
+        CPU_MODEL=$(lscpu 2>/dev/null | awk -F: '/^Model name:/ {sub(/^[ \t]+/, "", $2); print $2; exit}')
     fi
-    base=$(lsblk -no pkname "$src" 2>/dev/null | head -n1)
-    [[ -z "$base" ]] && base=$(basename "$src")
-    if [[ -f "/sys/block/$base/queue/rotational" ]]; then
-        cat "/sys/block/$base/queue/rotational"
-    else
-        echo 1
+    if [[ -z "$CPU_MODEL" && -r /proc/cpuinfo ]]; then
+        CPU_MODEL=$(awk -F: '/^(model name|Hardware|Processor)[ \t]*:/ {sub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo)
     fi
+    [[ -n "$CPU_MODEL" ]] || CPU_MODEL="unknown CPU"
 }
 
+# calc_threads: an explicit --threads N wins; otherwise use every CPU thread.
 calc_threads() {
-    local cores rota
-    cores=$(nproc 2>/dev/null || echo 1)
     if [[ -n "$THREADS" ]]; then
         echo "$THREADS"
-        return
-    fi
-    if (( AGGRESSIVE )); then
-        echo "$cores"
-        return
-    fi
-    rota=$(is_rotational "/")
-    if [[ "$rota" == "1" ]] && (( cores > 2 )); then
-        echo 2   # extra readers just cause seek-thrashing on HDD
     else
-        echo "$cores"
+        echo "$CPU_THREADS"
     fi
 }
 
@@ -170,7 +323,11 @@ ensure_database() {
     if (( DO_UPDATE )); then
         if (( HAVE_FRESHCLAM )); then
             log "Updating virus definitions..."
-            if freshclam --quiet >>"$LOGFILE" 2>&1; then
+            local fc_rc=0
+            hb_start "Updating virus definitions"
+            freshclam --quiet >>"$LOGFILE" 2>&1 || fc_rc=$?
+            hb_stop
+            if (( fc_rc == 0 )); then
                 log "Definition check complete."
             else
                 log "WARNING: freshclam could not update (offline, rate-limited, or no permission). Using the existing database."
@@ -216,15 +373,47 @@ start_clamd_via_init_system() {
     return 1
 }
 
-start_clamd_directly() {
-    local conf="" c
+find_clamd_conf() {
+    local c
     for c in /etc/clamav/clamd.conf /etc/clamd.d/scan.conf /etc/clamd.conf; do
-        [[ -f "$c" ]] && { conf="$c"; break; }
+        [[ -f "$c" ]] && { echo "$c"; return 0; }
     done
-    [[ -z "$conf" ]] && return 1
+    return 1
+}
+
+# clamd_conf_threads CONF: the MaxThreads value in CONF, or ClamAV's built-in
+# default (10) when it isn't set. MaxThreads is how many scans clamd will run
+# at the same time, so it is the real ceiling in daemon mode.
+clamd_conf_threads() {
+    local n=""
+    [[ -n "${1:-}" ]] && n=$(awk '$1 == "MaxThreads" {v = $2} END {print v}' "$1" 2>/dev/null)
+    if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then echo "$n"; else echo 10; fi
+}
+
+warn_if_clamd_limited() {
+    local cfg
+    cfg=$(clamd_conf_threads "$(find_clamd_conf)")
+    if (( cfg < WORKERS )); then
+        log "NOTE: clamd is configured with MaxThreads=$cfg, below this machine's $WORKERS threads, so the scan may not use every CPU thread. Set 'MaxThreads $WORKERS' in clamd.conf and restart clamd to lift the limit."
+    fi
+}
+
+start_clamd_directly() {
+    local conf
+    conf=$(find_clamd_conf) || return 1
     command -v clamd >/dev/null 2>&1 || return 1
 
-    log "No init system actually started clamd; launching it directly."
+    # If the system config would cap clamd below the number of workers, launch
+    # it from a copy of that config with MaxThreads raised to match. The
+    # system's own clamd.conf is never modified.
+    if (( $(clamd_conf_threads "$conf") < WORKERS )); then
+        local tuned="$STATE_DIR/clamd-tuned.conf"
+        { grep -v -E '^[[:space:]]*MaxThreads([[:space:]]|$)' "$conf"; echo "MaxThreads $WORKERS"; } > "$tuned"
+        conf="$tuned"
+        log "Launching clamd directly with MaxThreads=$WORKERS (the system config allows fewer)."
+    else
+        log "No init system actually started clamd; launching it directly."
+    fi
     mkdir -p "$LOG_DIR"
     nohup "${IONICE[@]}" "${RENICE[@]}" clamd --config-file="$conf" >>"$LOG_DIR/clamd.log" 2>&1 &
     disown 2>/dev/null || true
@@ -233,7 +422,10 @@ start_clamd_directly() {
 
 ensure_clamd() {
     command -v clamdscan >/dev/null 2>&1 || return 1
-    clamd_ready && return 0
+    if clamd_ready; then
+        warn_if_clamd_limited
+        return 0
+    fi
 
     # NOTE: init scripts can exit 0 without actually starting clamd (e.g.
     # a distro's init.d script silently refusing because it thinks the
@@ -241,22 +433,47 @@ ensure_clamd() {
     # give it a short window to come up for real, and if it doesn't,
     # fall through to launching clamd ourselves regardless of what the
     # init system claimed.
-    start_clamd_via_init_system
-    local waited=0
-    while (( waited < 10 )); do
-        clamd_ready && return 0
-        sleep 1
-        ((waited++))
-    done
+    log "clamd isn't running yet; starting it..."
+    local started_direct=0 conf
+    conf=$(find_clamd_conf) || conf=""
+    # The stock config would cap the scan below the CPU thread count: skip the
+    # init system and start clamd ourselves with the limit raised.
+    if [[ -n "$conf" ]] && (( $(clamd_conf_threads "$conf") < WORKERS )); then
+        start_clamd_directly && started_direct=1
+    fi
+    (( started_direct )) || start_clamd_via_init_system
 
-    start_clamd_directly
+    local waited=0 ready=0
+    if (( ! started_direct )); then
+        hb_start "Waiting for the init system to bring clamd up"
+        while (( waited < 10 )); do
+            clamd_ready && { ready=1; break; }
+            sleep 1
+            ((waited++))
+        done
+        hb_stop
+        if (( ready )); then
+            log "clamd is ready."
+            warn_if_clamd_limited
+            return 0
+        fi
+        start_clamd_directly
+    fi
 
     waited=0
+    log "Waiting for clamd to load the virus signatures (up to ${CLAMD_STARTUP_TIMEOUT}s)..."
+    hb_start "Loading virus signatures into clamd"
     while (( waited < CLAMD_STARTUP_TIMEOUT )); do
-        clamd_ready && return 0
+        clamd_ready && { ready=1; break; }
         sleep 1
         ((waited++))
     done
+    hb_stop
+    if (( ready )); then
+        log "clamd is ready (took ${waited}s)."
+        return 0
+    fi
+    log "WARNING: clamd did not answer within ${CLAMD_STARTUP_TIMEOUT}s (see $LOG_DIR/clamd.log)."
     return 1
 }
 
@@ -276,11 +493,14 @@ build_targets() {
 
 load_cache() {
     [[ -f "$CACHE_FILE" ]] || return 0
+    log "Loading the cache of previously scanned files..."
+    hb_start "Loading the scan cache"
     local p m s
     while IFS=$'\t' read -r p m s; do
         [[ -z "$p" ]] && continue
         CACHE_SEEN["$p"]="$m $s"
     done < "$CACHE_FILE"
+    hb_stop
 }
 
 build_candidates() {
@@ -290,6 +510,8 @@ build_candidates() {
 
     : > "$all"
     local t
+    log "Listing files under: ${TARGETS[*]}"
+    hb_start "Listing files"
     for t in "${TARGETS[@]}"; do
         [[ -e "$t" ]] || continue
         # -xdev: stay on each target's own filesystem (skip /proc, /sys,
@@ -297,6 +519,7 @@ build_candidates() {
         # target themselves).
         find "$t" -xdev -type f -not -path "${QUARANTINE_DIR}/*" 2>>"$LOGFILE" >> "$all"
     done
+    hb_stop
 
     TOTAL_FOUND=$(wc -l < "$all" | tr -d ' ')
     SKIPPED_CACHED=0
@@ -304,16 +527,20 @@ build_candidates() {
     if (( FORCE )) || (( DEFS_CHANGED )) || [[ ! -s "$CACHE_FILE" ]]; then
         cp "$all" "$kept"
     else
-        : > "$kept"
+        log "Comparing $TOTAL_FOUND file(s) with the cache of previously scanned files..."
+        hb_start "Checking which files changed"
         local f cur
-        while IFS= read -r f; do
-            cur=$(stat -c '%Y %s' "$f" 2>/dev/null) || { echo "$f" >> "$kept"; continue; }
+        # stat is run in big batches by xargs. Forking one stat per file was
+        # ~1.7ms each: over ten minutes of silence on a few hundred thousand
+        # files. (A file that vanished since find ran is simply left out.)
+        while IFS=$'\t' read -r cur f; do
             if [[ "${CACHE_SEEN[$f]:-}" == "$cur" ]]; then
                 ((SKIPPED_CACHED++))
             else
-                echo "$f" >> "$kept"
+                printf '%s\n' "$f"
             fi
-        done < "$all"
+        done < <(xargs -d '\n' -a "$all" -r stat -c $'%Y %s\t%n' -- 2>/dev/null) > "$kept"
+        hb_stop
     fi
 
     CANDIDATE_COUNT=$(wc -l < "$kept" | tr -d ' ')
@@ -325,6 +552,8 @@ save_cache() {
     local all="$workdir/all.txt" kept="$workdir/candidates.txt"
     local tmp="$STATE_DIR/scanned.cache.tmp.$$"
 
+    log "Saving the scan cache..."
+    hb_start "Saving the scan cache"
     : > "$tmp"
 
     if [[ -f "$all" && -f "$kept" ]]; then
@@ -336,31 +565,30 @@ save_cache() {
 
     if [[ -f "$kept" ]]; then
         local f st
-        while IFS= read -r f; do
+        # Batched stat again (see build_candidates). Files that no longer
+        # exist, e.g. quarantined ones, produce no line and are skipped.
+        while IFS=$'\t' read -r st f; do
             [[ -n "${INFECTED_SET[$f]:-}" ]] && continue
-            [[ -e "$f" ]] || continue
-            st=$(stat -c '%Y %s' "$f" 2>/dev/null) || continue
             printf '%s\t%s\n' "$f" "${st/ /$'\t'}"
-        done < "$kept" >> "$tmp"
+        done < <(xargs -d '\n' -a "$kept" -r stat -c $'%Y %s\t%n' -- 2>/dev/null) >> "$tmp"
     fi
 
     sort -o "$tmp" "$tmp" 2>/dev/null
     mkdir -p "$STATE_DIR"
     mv "$tmp" "$CACHE_FILE"
+    hb_stop
 }
 
-run_clamd_scan() {
-    local candidates="$1"
-    : > "$INFECTED_RAW"
-    [[ "$(wc -l < "$candidates" | tr -d ' ')" == "0" ]] && return 0
-    clamdscan --fdpass --multiscan -i --no-summary --file-list="$candidates" \
-        >> "$INFECTED_RAW" 2>>"$LOGFILE"
-    return 0
-}
-
-run_clamscan_parallel() {
-    local threads="$1" candidates="$2"
-    local total lines_per_chunk
+# run_parallel_scan CANDIDATES COMMAND [ARGS...]
+#   Splits the candidate list into WORKERS chunks and runs one copy of
+#   COMMAND per chunk, all at once. Each copy writes one "path: RESULT" line
+#   per file to $WORKDIR/chunk.*.scan. The list is dealt out round-robin
+#   (split -n r/N) rather than in contiguous blocks, so big files that sit
+#   together on disk are spread across workers and no worker is left running
+#   long after the others have finished.
+run_parallel_scan() {
+    local candidates="$1"; shift
+    local total workers chunk pid pids=() t0
 
     total=$(wc -l < "$candidates" | tr -d ' ')
     if (( total == 0 )); then
@@ -368,27 +596,30 @@ run_clamscan_parallel() {
         return 0
     fi
 
-    lines_per_chunk=$(( (total + threads - 1) / threads ))
-    (( lines_per_chunk < 1 )) && lines_per_chunk=1
+    workers=$WORKERS
+    (( workers > total )) && workers=$total
+    THREADS_USED="$workers"
 
-    split -l "$lines_per_chunk" "$candidates" "$WORKDIR/chunk."
+    split -n "r/$workers" "$candidates" "$WORKDIR/chunk."
 
-    local pids=() chunk
+    log "Scanning $total file(s) with $workers parallel worker(s)..."
+    t0=$SECONDS
+    hb_start "Scanning" "$total"
+
     for chunk in "$WORKDIR"/chunk.*; do
-        [[ -e "$chunk" ]] || continue
-        "${IONICE[@]}" "${RENICE[@]}" clamscan \
-            -i --no-summary "${MAXSIZE_FLAGS[@]}" \
-            --file-list="$chunk" \
-            > "$chunk.out" 2>>"$LOGFILE" &
+        [[ -s "$chunk" ]] || continue
+        # No -i: every file gets a result line, which the progress display
+        # counts. collect_scan_results keeps only the infected ones afterwards.
+        "$@" --file-list="$chunk" > "$chunk.scan" 2>>"$LOGFILE" &
         pids+=($!)
     done
 
-    local pid
     for pid in "${pids[@]}"; do
         wait "$pid" 2>/dev/null
     done
-
-    cat "$WORKDIR"/chunk.*.out > "$INFECTED_RAW" 2>/dev/null
+    hb_stop
+    report_scan "$total" "$t0"
+    collect_scan_results
 }
 
 parse_infected() {
@@ -485,6 +716,7 @@ print_summary() {
     {
         echo
         echo "===================== Scan summary ====================="
+        echo "CPU:                 $CPU_MODEL ($CPU_THREADS threads)"
         echo "Engine:              $ENGINE_USED ($THREADS_USED worker(s))"
         echo "Targets:             ${TARGETS[*]}"
         echo "Files found:         $TOTAL_FOUND"
@@ -528,11 +760,19 @@ parse_args() {
             *) EXPLICIT_PATHS+=("$1"); shift ;;
         esac
     done
+    if [[ -n "$THREADS" && ! "$THREADS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "--threads needs a positive whole number (got '$THREADS')" >&2
+        exit 2
+    fi
 }
 
 main() {
     require_root "$@"
     parse_args "$@"
+
+    # However we exit (Ctrl-C included): stop the progress heartbeat and
+    # remove the temp dir.
+    trap 'hb_stop; [[ -n "${WORKDIR:-}" ]] && rm -rf "$WORKDIR"' EXIT
 
     mkdir -p "$STATE_DIR" "$LOG_DIR"
     LOGFILE="$LOG_DIR/scan-$(date +%Y%m%d-%H%M%S).log"
@@ -540,6 +780,15 @@ main() {
     START_TS=$(date +%s)
 
     log "antivirus starting (mode=$MODE, delete=$DO_DELETE, aggressive=$AGGRESSIVE)"
+
+    detect_cpu
+    WORKERS=$(calc_threads)
+    THREADS_USED="$WORKERS"
+    if [[ -n "$THREADS" ]]; then
+        log "CPU: $CPU_MODEL, $CPU_THREADS thread(s); --threads given, using $WORKERS worker(s)."
+    else
+        log "CPU: $CPU_MODEL, $CPU_THREADS thread(s); using all $WORKERS for scanning."
+    fi
 
     check_deps
     load_cache
@@ -554,11 +803,7 @@ main() {
     command -v ionice >/dev/null 2>&1 || IONICE=()
     command -v nice   >/dev/null 2>&1 || RENICE=()
 
-    local threads_calc
-    threads_calc=$(calc_threads)
-
     WORKDIR=$(mktemp -d)
-    trap 'rm -rf "$WORKDIR"' EXIT
 
     build_candidates "$WORKDIR"
 
@@ -566,15 +811,15 @@ main() {
     : > "$INFECTED_RAW"
 
     if (( HAVE_CLAMD )) && ensure_clamd; then
-        ENGINE_USED="clamd daemon (multiscan+fdpass)"
-        THREADS_USED="daemon-managed"
+        ENGINE_USED="clamd daemon (fdpass)"
         log "Using the clamd daemon for scanning."
-        run_clamd_scan "$WORKDIR/candidates.txt"
+        run_parallel_scan "$WORKDIR/candidates.txt" \
+            clamdscan --fdpass --multiscan --no-summary
     else
         ENGINE_USED="clamscan (parallel fallback)"
-        THREADS_USED="$threads_calc"
-        log "clamd unavailable; falling back to $threads_calc parallel clamscan worker(s)."
-        run_clamscan_parallel "$threads_calc" "$WORKDIR/candidates.txt"
+        log "clamd unavailable; falling back to parallel clamscan workers."
+        run_parallel_scan "$WORKDIR/candidates.txt" \
+            "${IONICE[@]}" "${RENICE[@]}" clamscan --no-summary "${MAXSIZE_FLAGS[@]}"
     fi
 
     local infected_parsed="$WORKDIR/infected_parsed.tsv"
