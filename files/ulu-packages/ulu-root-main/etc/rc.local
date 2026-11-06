@@ -112,36 +112,97 @@ fi
 #chrt -f -p 99 $(pgrep -f "irq/50" | head -1) 2>/dev/null || true
 
 # Memory Management: Compressed RAM Device Configuration
-{
-    if modprobe zram 2>/dev/null; then
-        if [ -f /sys/class/zram-control/hot_add ]; then
-            ZRAM_ID=$(cat /sys/class/zram-control/hot_add 2>/dev/null)
-            ZRAM_DEV="/dev/zram${ZRAM_ID}"
+zram_abort() {    # $1 = device id, $2 = reason
+    echo "rc.local: zram$1 setup failed: $2" > /dev/kmsg 2>/dev/null
+    echo 1 > "/sys/block/zram$1/reset" 2>/dev/null
+    echo "$1" > /sys/class/zram-control/hot_remove 2>/dev/null
+    return 1
+}
 
-            if [ -b "$ZRAM_DEV" ]; then
-                echo 1 > "/sys/block/zram${ZRAM_ID}/reset" 2>/dev/null || true
+zram_ratio() {
+    [ "${2:-0}" -gt 0 ] || { echo "-"; return; }
+    printf '%d.%02d' $(( $1 * 100 / $2 / 100 )) $(( $1 * 100 / $2 % 100 ))
+}
 
-                # Calculate zram size (25% of RAM)
-                RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo) || RAM_KB=2097152
-                ZRAM_SIZE_BYTES=$(( RAM_KB * 1024 / 4 ))
-
-                # Add lz4 compression
-                echo lz4 > "/sys/block/zram${ZRAM_ID}/comp_algorithm" 2>/dev/null || true
-
-                # Dynamically detect CPU core count
-                CPU_CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo || echo 4)
-                echo "$CPU_CORES" > "/sys/block/zram${ZRAM_ID}/max_comp_streams" 2>/dev/null || true
-
-                if echo "$ZRAM_SIZE_BYTES" > "/sys/block/zram${ZRAM_ID}/disksize" 2>/dev/null; then
-                    if mkswap "$ZRAM_DEV" >/dev/null 2>&1 && swapon "$ZRAM_DEV" -p 100; then
-                        # zswap in front of zram compresses every page twice
-                        [ -w /sys/module/zswap/parameters/enabled ] && echo N > /sys/module/zswap/parameters/enabled
-                    fi
-                fi
-            fi
+zram_recompress_loop() {    # $1 = device id, $2 = idle seconds
+    local sys="/sys/block/zram$1" secs="$2" orig comp0 comp1 pool0 pool1 same nz
+    renice -n 19 -p "$BASHPID" >/dev/null 2>&1
+    while :; do
+        echo all > "$sys/idle" 2>/dev/null || break
+        sleep "$secs"
+        read -r orig comp0 pool0 _ _ same _ < "$sys/mm_stat" || break
+        [ "${orig:-0}" -gt $(( 256 * 1048576 )) ] || continue
+        nz=$(( ${orig:-0} - ${same:-0} * 4096 ))  
+        echo "type=idle" > "$sys/recompress" 2>/dev/null || break
+        read -r _ comp1 _ < "$sys/mm_stat" || break
+        echo 1 > "$sys/compact" 2>/dev/null
+        read -r _ _ pool1 _ < "$sys/mm_stat" || break
+        if [ $(( ${comp0:-0} - ${comp1:-0} )) -ge 8388608 ] || [ $(( ${pool0:-0} - ${pool1:-0} )) -ge 16777216 ]; then
+            echo "rc.local: zram$1 recompress: $(( nz / 1048576 ))M data, compressed $(( ${comp0:-0} / 1048576 ))M -> $(( ${comp1:-0} / 1048576 ))M (ratio $(zram_ratio "$nz" "${comp0:-0}") -> $(zram_ratio "$nz" "${comp1:-0}"):1), pool $(( ${pool0:-0} / 1048576 ))M -> $(( ${pool1:-0} / 1048576 ))M" > /dev/kmsg 2>/dev/null
         fi
+    done
+    echo "rc.local: zram$1 recompress loop stopped" > /dev/kmsg 2>/dev/null
+}
+
+setup_zram() {
+    local extra_pct=50         
+    local algo_want=lz4        
+    local ratio_pct=180        
+    local pool_cap_pct=60      
+    local recomp_algo=zstd     
+    local recomp_idle=120      
+    local id dev sys ram_kb target_kb size cap w algo recomp=0
+
+    # Already active: don't stack a second device
+    grep -q '^/dev/zram' /proc/swaps 2>/dev/null && return 0
+
+    modprobe zram 2>/dev/null || return 1
+    [ -f /sys/class/zram-control/hot_add ] || return 1
+    id=$(cat /sys/class/zram-control/hot_add 2>/dev/null)
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    dev="/dev/zram$id"
+    sys="/sys/block/zram$id"
+
+    # The device node can lag behind hot_add: wait up to ~5s
+    for ((w = 0; w < 25; w++)); do
+        [ -b "$dev" ] && break
+        sleep 0.2
+    done
+    [ -b "$dev" ] || { zram_abort "$id" "device node never appeared"; return 1; }
+
+    ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    if ! [[ "$ram_kb" =~ ^[0-9]+$ ]] || [ "$ram_kb" -le 0 ]; then
+        ram_kb=2097152
     fi
-} &
+    target_kb=$(( ram_kb + ram_kb * extra_pct / 100 ))
+    size=$(( (target_kb - ram_kb) * 1024 * ratio_pct / (ratio_pct - 100) ))
+    cap=$(( size * pool_cap_pct / 100 ))
+
+    # Algorithms must be set before disksize
+    echo "$algo_want" > "$sys/comp_algorithm" 2>/dev/null || true
+
+    if [ -n "$recomp_algo" ] && [ -w "$sys/recomp_algorithm" ] && [ -w "$sys/recompress" ] && [ -w "$sys/idle" ]; then
+        echo "algo=$recomp_algo priority=1" > "$sys/recomp_algorithm" 2>/dev/null && recomp=1
+    fi
+
+    echo "$size" > "$sys/disksize" 2>/dev/null || { zram_abort "$id" "disksize rejected"; return 1; }
+    echo "$cap" > "$sys/mem_limit" 2>/dev/null || true
+
+    mkswap "$dev" >/dev/null 2>&1 || { zram_abort "$id" "mkswap failed"; return 1; }
+    # --discard lets zram release the compressed copy as soon as a swap slot is freed
+    swapon --discard -p 100 "$dev" 2>/dev/null || { zram_abort "$id" "swapon failed"; return 1; }
+
+    # zswap in front of zram compresses every page twice
+    [ -w /sys/module/zswap/parameters/enabled ] && echo N > /sys/module/zswap/parameters/enabled
+
+    algo=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$sys/comp_algorithm" 2>/dev/null)
+    echo "rc.local: zram$id ${algo:-?} disksize $((size / 1048576))M pool-cap $((cap / 1048576))M prio 100 recomp=$([ "$recomp" = 1 ] && echo "$recomp_algo/${recomp_idle}s" || echo off)" > /dev/kmsg 2>/dev/null
+    if [ "$recomp" = 1 ]; then
+        zram_recompress_loop "$id" "$recomp_idle" </dev/null >/dev/null 2>&1 &
+    fi
+    return 0
+}
+setup_zram &
 
 # Kernel Parameters: Runtime Configuration Reload
 { sysctl -p || true; } &

@@ -113,7 +113,7 @@ The desktop scheduler is set to `IMPERATOR` and laptops use `AURA`. `IMPERATOR` 
 ### Memory Management
 RAM usage has the highest priority over swapping. Keeping active data in memory reduces wear on the drive and increases system responsiveness. Swapping is still possible but only used when RAM is nearly full, first to ZRAM and then to any swap on disk. Proactive memory compaction is turned off and keeps directory and inode caches in memory longer. 16 HugePages (2 MB each) are reserved at boot and up to 3968 more are allocated on demand for programs that request them.
 
-**ZRAM Integration:** `rc.local` sets up a compressed swap device in RAM, sized at 25% of total RAM and compressed with [LZ4](https://lz4.org/) on desktops and zstd on laptops. It is enabled with a higher priority than swap on disk and Zswap is turned off once it is active so pages aren't compressed twice.
+**ZRAM Integration:** rc.local sets up compressed swap in RAM. On desktops the ZRAM device is sized to target 50% more effective memory than detected RAM (1.8:1 compression), it's memory use is capped at 60% of the device size and uses [LZ4](https://lz4.org/) for fast swap; once more than 256 MiB is stored, pages that stay idle for 120 seconds are recompressed by [ZSTD](https://github.com/meta/zstd). Laptops create a ZRAM swap device sized to 25% of detected RAM using [ZSTD](https://github.com/meta/zstd). Both desktop and laptop ZRAM have higher priority than swap on disk and Zswap is turned off once ZRAM is active so pages aren't compressed twice.
 
 ### Ephemeral Overlay
 
