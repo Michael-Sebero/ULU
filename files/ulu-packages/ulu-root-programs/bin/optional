@@ -272,12 +272,6 @@ if [ "$optional1" = "y" ] || [ "$optional1" = "Y" ]; then
     pacman -S --noconfirm python-dateutil python-xlib python-pyaudio python-pipenv python-matplotlib python-tqdm python-magic python-piexif python-moviepy python-brotli python-websockets python-librosa python-pypdf2 python-pytesseract || true
 fi
 
-# OPTIONAL PACKAGES
-read -p "Do you want to install optional packages? (Artix/Arch only) [y/N] " optional2
-if [ "$optional2" = "y" ] || [ "$optional2" = "Y" ]; then
-    runuser -u "$ACTUAL_USER" -- env HOME="/home/$ACTUAL_USER" XDG_CACHE_HOME="/home/$ACTUAL_USER/.cache" XDG_CONFIG_HOME="/home/$ACTUAL_USER/.config" XDG_DATA_HOME="/home/$ACTUAL_USER/.local/share" paru -S gparted gsmartcontrol gpu-screen-recorder-gtk-git github-desktop nicotine+ miniupnpc psensor testdisk tenacity pipewire-jack qbittorrent nix thunderbird docker python-pipx songrec mangohud lib32-mangohud librewolf tmux font-manager bleachbit catfish element-desktop libreoffice noto-fonts-emoji tauon-music-box freetube alsa-utils gimp haruna kate konsole kcalc xfce4-panel-profiles okular ark akregator
-fi
-
 # OPTIONAL EMULATORS
 read -p "Do you want to install game console emulators? (Artix/Arch only) [y/N] " console_emu
 if [ "$console_emu" = "y" ] || [ "$console_emu" = "Y" ]; then
@@ -348,6 +342,12 @@ fi
 read -p "Do you want to overclock/undervolt an AMD card? (Artix/Arch only) [y/N] " AMD
 if [ "$AMD" = "y" ] || [ "$AMD" = "Y" ]; then
     pacman -S lact
+fi
+
+# PERSONAL PACKAGES
+read -p "Do you want to install packages? (Personal Packages) [y/N] " personal
+if [ "$personal" = "y" ] || [ "$personal" = "Y" ]; then
+    runuser -u "$ACTUAL_USER" -- env HOME="/home/$ACTUAL_USER" XDG_CACHE_HOME="/home/$ACTUAL_USER/.cache" XDG_CONFIG_HOME="/home/$ACTUAL_USER/.config" XDG_DATA_HOME="/home/$ACTUAL_USER/.local/share" paru -S gparted gsmartcontrol gpu-screen-recorder-gtk-git github-desktop nicotine+ miniupnpc testdisk tenacity pipewire-jack qbittorrent thunderbird python-pipx songrec mangohud lib32-mangohud librewolf tmux font-manager bleachbit element-desktop libreoffice noto-fonts-emoji tauon-music-box freetube alsa-utils gimp haruna kate konsole kcalc okular ark akregator mesa-tkg-git lib32-mesa-tkg-git picard google-earth-pro hydra-launcher-bin prismlauncher 
 fi
 
 # FINAL REBOOT PROMPT
