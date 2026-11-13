@@ -122,6 +122,17 @@
 
 ..................................................................................................................................................
 
+ / ERROR LOG /
+
+ . errors
+
+ - This command shows the errors and warnings logged during this boot (kernel, services, Xorg).
+   [ errors -b ] shows the previous boot instead: whether it shut down cleanly, its errors, any kernel crash dump,
+   and the last messages it logged before it stopped. Use it after a freeze that needed the power button.
+   [ errors -f ] follows the logs live and [ errors -s ] explains which logs were found when the output is empty.
+
+..................................................................................................................................................
+
  / KEYWORD SEARCH /
 
  . ks /example/directory keyword

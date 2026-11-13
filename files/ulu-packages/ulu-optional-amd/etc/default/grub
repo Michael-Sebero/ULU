@@ -4,7 +4,7 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR=""
 GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 nokaslr noresume rootflags=noatime,lazytime"
-GRUB_CMDLINE_LINUX="cpufreq.default_governor=performance nowatchdog transparent_hugepage=madvise console=tty2 processor.max_cstate=1 threadirqs preempt=full libahci.ignore_sss=1 tsc=reliable clocksource=tsc hpet=disable rcu_expedited random.trust_bootloader=on amdgpu.ppfeaturemask=0xffffffff mce=ignore_ce mitigations=off audit=0 skew_tick=1 workqueue.power_efficient=0 init_on_alloc=0 init_on_free=0 kfence.sample_interval=0 nvme_core.default_ps_max_latency_us=0 amdgpu.mcbp=0 amdgpu.gpu_recovery=1 amdgpu.deep_color=1 amd_pstate=active amdgpu.runpm=0 iommu=pt usbcore.autosuspend=-1 pcie_aspm=off random.trust_cpu=on lsm=none"
+GRUB_CMDLINE_LINUX="efi_pstore.pstore_disable=0 cpufreq.default_governor=performance nowatchdog transparent_hugepage=madvise console=tty2 processor.max_cstate=1 threadirqs preempt=full libahci.ignore_sss=1 tsc=reliable clocksource=tsc hpet=disable rcu_expedited random.trust_bootloader=on amdgpu.ppfeaturemask=0xffffffff mce=ignore_ce mitigations=off audit=0 skew_tick=1 workqueue.power_efficient=0 init_on_alloc=0 init_on_free=0 kfence.sample_interval=0 nvme_core.default_ps_max_latency_us=0 amdgpu.mcbp=0 amdgpu.gpu_recovery=1 amdgpu.deep_color=1 amd_pstate=active amdgpu.runpm=0 iommu=pt usbcore.autosuspend=-1 pcie_aspm=off random.trust_cpu=on lsm=none"
 
 # Preload both GPT and MBR modules so that they are not missed
 GRUB_PRELOAD_MODULES="part_gpt part_msdos"

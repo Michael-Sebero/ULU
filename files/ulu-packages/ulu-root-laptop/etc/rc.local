@@ -159,14 +159,18 @@ if [ "$TIME_SINCE_TRIM" -ge "$TRIM_INTERVAL" ]; then
     [ "$TRIMMED_ANY" -eq 1 ] && echo "$NOW" > "$TRIM_STAMP" 2>/dev/null
 fi
 
-# Logging: Volatile Journal (systemd only) and Pstore Crash Log Archival
+# Logging: Persistent Journal (systemd only) and Pstore Crash Log Archival
+# The journal is kept on disk (capped at 50M) so [ errors -b ] can show the previous boot after a freeze;
+# SyncIntervalSec pushes it to disk every few seconds instead of every 5 minutes
 if [ -d /run/systemd/system ]; then
     JOURNAL_CONF=/etc/systemd/journald.conf.d/90-ulu.conf
     JOURNAL_WANT=$(printf '%s\n' \
         '# Restored by /etc/rc.local at boot; override with a later file such as 99-local.conf' \
         '[Journal]' \
-        'Storage=volatile' \
-        'RuntimeMaxUse=50M')
+        'Storage=persistent' \
+        'SystemMaxUse=50M' \
+        'RuntimeMaxUse=50M' \
+        'SyncIntervalSec=5s')
     if [ "$(cat "$JOURNAL_CONF" 2>/dev/null)" != "$JOURNAL_WANT" ]; then
         mkdir -p "${JOURNAL_CONF%/*}"
         printf '%s\n' "$JOURNAL_WANT" > "$JOURNAL_CONF" && systemctl restart systemd-journald
@@ -181,6 +185,35 @@ else
         install -d -m 0700 "$PSTORE_DEST" && cp -p "$f" "$PSTORE_DEST/" && rm -f "$f"
     done
 fi
+
+# Logging: Crash-Safe Log Files
+# Written data can sit in RAM for many seconds before reaching disk, which is exactly the part of the log
+# that explains a freeze. Flush the log files to disk every 3s (a no-op when nothing changed) and keep
+# metalog in unbuffered mode, so [ errors -b ] still has the last messages after a forced power-off.
+log_flush_loop() {
+    local f pid last_pid=""
+    local -a files
+    renice -n 19 -p "$BASHPID" >/dev/null 2>&1
+    chrt -i -p 0 "$BASHPID" >/dev/null 2>&1
+    shopt -s nullglob
+    while :; do
+        # SIGUSR1 = metalog synchronous mode; re-sent whenever metalog (re)starts
+        pid=$(pgrep -o -x metalog 2>/dev/null)
+        if [ -n "$pid" ] && [ "$pid" != "$last_pid" ]; then
+            kill -USR1 "$pid" 2>/dev/null
+            last_pid=$pid
+        fi
+        files=()
+        for f in /var/log/*/current /var/log/socklog/*/current \
+                 /var/log/syslog /var/log/messages /var/log/kern.log /var/log/daemon.log \
+                 /var/log/auth.log /var/log/user.log /var/log/rc.log /var/log/Xorg.0.log; do
+            [ -f "$f" ] && files+=("$f")
+        done
+        [ "${#files[@]}" -gt 0 ] && sync -d "${files[@]}" 2>/dev/null
+        sleep 3
+    done
+}
+{ log_flush_loop </dev/null >/dev/null 2>&1 & } &
 
 # Security: Randomize Machine ID (on systemd this happens at shutdown, see the top of this file)
 [ -d /run/systemd/system ] || randomize_machine_id &

@@ -4,7 +4,7 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR=""
 GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 noresume rootflags=noatime,lazytime"
-GRUB_CMDLINE_LINUX="nvidia-drm.modeset=1 cpufreq.default_governor=performance nowatchdog transparent_hugepage=never console=tty2 processor.max_cstate=1 intel_idle.max_cstate=0 nvme_core.default_ps_max_latency_us=0 usbcore.autosuspend=-1 preempt=voluntary pcie_aspm=off libahci.ignore_sss=1 tsc=reliable clocksource=tsc hpet=disable split_lock_detect=off rcu_expedited random.trust_bootloader=on lsm=capability,landlock,lockdown,yama,apparmor,bpf"
+GRUB_CMDLINE_LINUX="efi_pstore.pstore_disable=0 nvidia-drm.modeset=1 cpufreq.default_governor=performance nowatchdog transparent_hugepage=never console=tty2 processor.max_cstate=1 intel_idle.max_cstate=0 nvme_core.default_ps_max_latency_us=0 usbcore.autosuspend=-1 preempt=voluntary pcie_aspm=off libahci.ignore_sss=1 tsc=reliable clocksource=tsc hpet=disable split_lock_detect=off rcu_expedited random.trust_bootloader=on lsm=capability,landlock,lockdown,yama,apparmor,bpf"
 
 # Preload both GPT and MBR modules so that they are not missed
 GRUB_PRELOAD_MODULES="part_gpt part_msdos"

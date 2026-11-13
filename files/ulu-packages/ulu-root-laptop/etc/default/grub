@@ -4,7 +4,7 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=0
 GRUB_DISTRIBUTOR=""
 GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 rootflags=noatime,lazytime"
-GRUB_CMDLINE_LINUX="nowatchdog console=tty2 page_alloc.shuffle=1 iommu=pt random.trust_bootloader=on transparent_hugepage=madvise lsm=capability,landlock,lockdown,yama,apparmor,bpf nmi_watchdog=0 nohz=on"
+GRUB_CMDLINE_LINUX="efi_pstore.pstore_disable=0 nowatchdog console=tty2 page_alloc.shuffle=1 iommu=pt random.trust_bootloader=on transparent_hugepage=madvise lsm=capability,landlock,lockdown,yama,apparmor,bpf nmi_watchdog=0 nohz=on"
 
 # Preload both GPT and MBR modules so that they are not missed
 GRUB_PRELOAD_MODULES="part_gpt part_msdos"

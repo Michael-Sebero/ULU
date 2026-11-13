@@ -1,13 +1,26 @@
 #!/bin/bash
 #
-# errors -- show only error/warning (and worse) messages from system logs,
-# without depending on systemd/journalctl. Reads plain-text syslog files
-# plus the kernel ring buffer (dmesg).
+# errors -- show error/warning (and worse) messages from the system logs,
+# for this boot or for the previous one (e.g. after a freeze that needed
+# the power button).
+#
+# Init-system agnostic. It reads, whichever exist:
+#   * the systemd journal (only when systemd is PID 1)
+#   * the kernel ring buffer (dmesg, this boot only)
+#   * classic syslog files (rsyslog / syslog-ng / busybox syslogd)
+#   * "<dir>/current" files from metalog, socklog/svlogd and s6-log,
+#     plus their rotated copies
+#   * OpenRC's rc.log and the Xorg log
+#   * kernel crash dumps saved by pstore (archived at boot by rc.local
+#     or systemd-pstore)
+# Most of these are root-only, so it re-runs itself through doas/sudo
+# unless -U is given.
 
 set -uo pipefail
 
-# Candidate log files (varies by distro); only readable ones are used.
-LOG_CANDIDATES=(
+# Classic syslog-style files. Skipped when the journal is used (it already
+# contains the same messages).
+SYSLOG_FILES=(
     /var/log/syslog
     /var/log/messages
     /var/log/kern.log
@@ -17,97 +30,686 @@ LOG_CANDIDATES=(
     /var/log/user.log
 )
 
-# Case-insensitive whole-word match. Covers standard syslog severities
-# (err/error, warn/warning, crit/critical, alert, emerg/emergency) plus
-# fail/failed/failure/failing, since most real-world failures are
-# logged with that word rather than the literal word "error".
-PATTERN='\b(error|err|warn(ing)?|fail(ed|ure|ing)?|critical|crit|emerg(ency)?|alert)\b'
+# OpenRC: services that failed to start/stop.
+RC_LOG=/var/log/rc.log
+
+# Directory-style loggers that write <dir>/current
+# (metalog, socklog/svlogd, s6-log, s6-linux-init catch-all logger).
+CURRENT_GLOBS=(
+    '/var/log/everything/current'   # metalog's full log first; others are subsets
+    '/var/log/*/current'
+    '/var/log/socklog/*/current'
+    '/run/uncaught-logs/current'
+)
+
+# Kernel-facility logs repeat dmesg, so for this boot they are skipped
+# when dmesg is readable. For the previous boot they are the only record.
+KERNEL_LOG_RE='^/var/log/(kern\.log|kernel/current|socklog/kernel/current)$'
+
+# Where kernel crash dumps (pstore) are archived at boot.
+PSTORE_DIRS=(/var/lib/pstore /var/lib/systemd/pstore /sys/fs/pstore)
+
+# Case-insensitive whole-word match on standard syslog severities plus
+# fail/failed/failure/failing (most real failures say that rather than
+# "error"), words that precede crashes and freezes (hangs, lockups,
+# stalls, OOM kills, kernel oopses), Xorg's "(EE)" marker and OpenRC's
+# "[ !! ]" failure marker.
+PATTERN='\b(error|err|warn(ing)?|fail(ed|ure|ing)?|critical|crit|emerg(ency)?|alert|panic|oops|segfault|BUG|Call Trace|hung|hang|lockup|stall(ed)?|timed out|tainted|out of memory|killed process)\b|\(EE\)|\[ !! \]'
+
+DMESG_LEVELS=emerg,alert,crit,err,warn
+
+# Unfiltered lines shown from the very end of the previous boot: a freeze
+# often leaves no error line, but the last messages show what was going on.
+LAST_CONTEXT=40
 
 LINES=200
 FOLLOW=0
+ELEVATE=1
+SHOW_SOURCES=0
+PREV=0
 
 usage() {
     cat <<'EOF'
-errors -- show only error/warning (and worse) messages from system logs.
-Works without systemd/journalctl: reads plain-text syslog files + dmesg.
+errors -- show error/warning (and worse) messages from the system logs.
 
 Usage:
-  errors            Show recent matching lines (one-shot)
+  errors            Errors and warnings from this boot
+  errors -b         The previous boot: whether it shut down cleanly, its
+                    errors, any kernel crash dump, and the last messages it
+                    logged before it stopped (use after a freeze or a forced
+                    power-off)
   errors -f         Follow logs live; print new matches as they arrive
-  errors -n LINES   Lines to scan per log file (default: 200)
+  errors -n LINES   Max matching lines per log (default: 200)
+  errors -s         List log sources, boot history and crash-dump status,
+                    then exit (use this when output is empty)
+  errors -U         Don't re-run through doas/sudo (root-only logs are skipped)
   errors -h         Show this help
 
-Notes:
-  * Run with sudo for full access to /var/log/auth.log etc. if your
-    user isn't in the 'adm' group.
-  * Edit LOG_CANDIDATES / PATTERN at the top of this script to tune
-    which files and keywords are matched.
+Sources (whichever exist): systemd journal, dmesg, /var/log/{syslog,messages,...},
+metalog/socklog/s6-log "current" files (with rotations), OpenRC rc.log,
+Xorg logs, pstore kernel crash dumps. Lines repeated across logs are shown once.
 EOF
 }
 
-while getopts ":fn:h" opt; do
+while getopts ":bfn:sUh" opt; do
     case "$opt" in
+        b) PREV=1 ;;
         f) FOLLOW=1 ;;
         n) LINES="$OPTARG" ;;
+        s) SHOW_SOURCES=1 ;;
+        U) ELEVATE=0 ;;
         h) usage; exit 0 ;;
-        \?) echo "errors: unknown option -$OPTARG" >&2; usage; exit 1 ;;
+        \?) echo "errors: unknown option -$OPTARG" >&2; usage >&2; exit 1 ;;
         :)  echo "errors: -$OPTARG requires an argument" >&2; exit 1 ;;
     esac
 done
 
 case "$LINES" in
-    ''|*[!0-9]*) echo "errors: -n requires a positive integer" >&2; exit 1 ;;
+    ''|*[!0-9]*|0) echo "errors: -n requires a positive integer" >&2; exit 1 ;;
 esac
+if [ "$PREV" -eq 1 ] && [ "$FOLLOW" -eq 1 ]; then
+    echo "errors: -b and -f can't be combined" >&2
+    exit 1
+fi
 
-FILES=()
-for f in "${LOG_CANDIDATES[@]}"; do
-    [ -r "$f" ] && FILES+=("$f")
-done
+AWK=$(command -v gawk || command -v awk)
+CUR_BOOT=$(awk '/^btime/ {print $2}' /proc/stat)
+
+# Turns log lines into "epoch<TAB>line" for lines inside [start, end)
+# (end=0: no upper bound). Understands classic syslog ("Nov 13 09:49:01"),
+# RFC 3339/5424 and svlogd ("2026-11-13T09:49:01", "2026-11-13_09:49:01")
+# and OpenRC rc.log section headers. Lines without a timestamp
+# (continuations) inherit the previous one.
+# shellcheck disable=SC2016
+WINDOW_AWK='
+BEGIN {
+    split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", m, " ")
+    for (i = 1; i <= 12; i++) mon[m[i]] = i
+    ref = (end > 0 ? end : systime())
+    yr = strftime("%Y", ref) + 0
+    t = -1
+}
+{
+    if (match($0, /^([A-Z][a-z][a-z]) +([0-9]{1,2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})/, a) && (a[1] in mon)) {
+        # No year in classic syslog: assume the reference year, or the one
+        # before when that would put the line in the future.
+        t = mktime(yr " " mon[a[1]] " " a[2] " " a[3] " " a[4] " " a[5])
+        if (t > ref + 86400) t = mktime((yr - 1) " " mon[a[1]] " " a[2] " " a[3] " " a[4] " " a[5])
+    } else if (match($0, /^(<[0-9]+>[0-9]* )?([0-9]{4})-([0-9]{2})-([0-9]{2})[T_ ]([0-9]{2}):([0-9]{2}):([0-9]{2})/, a)) {
+        t = mktime(a[2] " " a[3] " " a[4] " " a[5] " " a[6] " " a[7])
+    } else if (match($0, /^rc [a-z]+ logging (started|stopped) at [A-Z][a-z][a-z] ([A-Z][a-z][a-z]) +([0-9]{1,2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) ([0-9]{4})/, a) && (a[2] in mon)) {
+        t = mktime(a[7] " " mon[a[2]] " " a[3] " " a[4] " " a[5] " " a[6])
+    }
+    if (t >= 0 && t >= start && (end <= 0 || t < end)) print t "\t" $0
+}'
+
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+fmt_time() { date -d "@$1" '+%a %b %e %H:%M:%S %Y' 2>/dev/null; }
+
+mtime() { stat -c %Y -- "$1" 2>/dev/null || echo 0; }
+
+# Print a (possibly compressed) log file.
+read_log() {
+    case "$1" in
+        *.gz)  zcat -- "$1" ;;
+        *.xz)  xzcat -- "$1" ;;
+        *.zst) zstdcat -q -- "$1" ;;
+        *.bz2) bzcat -- "$1" ;;
+        *)     cat -- "$1" ;;
+    esac 2>/dev/null
+}
+
+# A live log file preceded by its rotated copies, oldest first, so the
+# output reads chronologically.
+log_family() {
+    local f=$1 dir=${1%/*} base=${1##*/} n x
+    local -a out=()
+    shopt -s nullglob
+    if [ "$base" = current ]; then
+        # metalog: log-YYYY-MM-DD-HH:MM:SS[.gz]; svlogd/s6-log: @<tai64n>.[su]
+        # (both sort chronologically by name)
+        out+=("$dir"/log-* "$dir"/@*)
+    else
+        # logrotate: file-YYYYMMDD[.gz] (dateext) or file.N[.gz] (higher = older)
+        out+=("$f"-[0-9]*)
+        for ((n = 20; n >= 1; n--)); do
+            for x in "$f.$n" "$f.$n".*; do
+                [ -f "$x" ] && out+=("$x")
+            done
+        done
+    fi
+    shopt -u nullglob
+    out+=("$f")
+    printf '%s\n' "${out[@]}"
+}
+
+is_overlay_log() {
+    $AWK '$2 == "/var/log" && ($3 == "overlay" || $3 == "tmpfs") { found = 1 } END { exit !found }' /proc/mounts
+}
+
+pstore_backend() {
+    local b
+    b=$(cat /sys/module/pstore/parameters/backend 2>/dev/null)
+    case "$b" in ''|'(null)') echo none ;; *) echo "$b" ;; esac
+}
+
+# Kernel crash dumps from the previous boot: anything archived during
+# this boot, plus records still sitting in /sys/fs/pstore.
+fresh_pstore_files() {
+    local d
+    for d in "${PSTORE_DIRS[@]}"; do
+        [ -d "$d" ] || continue
+        if [ "$d" = /sys/fs/pstore ]; then
+            find "$d" -maxdepth 1 -type f 2>/dev/null
+        else
+            find "$d" -type f -newermt "@$CUR_BOOT" 2>/dev/null
+        fi
+    done | sort
+}
+
+# ---------------------------------------------------------------------
+# Boot history: PREV_BOOT (epoch, or empty) and PREV_SHUTDOWN
+# (clean | unclean | unknown), from wtmp with rc.log as a fallback.
+# ---------------------------------------------------------------------
+PREV_BOOT=""
+PREV_SHUTDOWN=unknown
+
+boot_history() {
+    local recs="" type t f
+    if command -v last >/dev/null 2>&1; then
+        recs+=$(LC_ALL=C last -x -F -w reboot shutdown 2>/dev/null | $AWK '
+            BEGIN { split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", m, " "); for (i = 1; i <= 12; i++) mon[m[i]] = i }
+            ($1 == "reboot" || $1 == "shutdown") &&
+            match($0, /[A-Z][a-z][a-z] ([A-Z][a-z][a-z]) +([0-9]{1,2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) ([0-9]{4})/, a) && (a[1] in mon) {
+                print $1, mktime(a[6] " " mon[a[1]] " " a[2] " " a[3] " " a[4] " " a[5])
+            }')
+        recs+=$'\n'
+    fi
+    if [ -r "$RC_LOG" ]; then
+        recs+=$(while read -r f; do read_log "$f"; done < <(log_family "$RC_LOG") | $AWK '
+            BEGIN { split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", m, " "); for (i = 1; i <= 12; i++) mon[m[i]] = i }
+            match($0, /^rc ([a-z]+) logging started at [A-Z][a-z][a-z] ([A-Z][a-z][a-z]) +([0-9]{1,2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) ([0-9]{4})/, a) && (a[2] in mon) {
+                type = (a[1] == "boot" ? "reboot" : (a[1] == "shutdown" || a[1] == "reboot") ? "shutdown" : "")
+                if (type != "") print type, mktime(a[7] " " mon[a[2]] " " a[3] " " a[4] " " a[5] " " a[6])
+            }')
+    fi
+
+    while read -r type t; do
+        [ "$type" = reboot ] || continue
+        [[ "$t" =~ ^[0-9]+$ ]] || continue
+        # Boot records are written a few seconds after the kernel starts,
+        # so anything before this boot's start belongs to an earlier boot.
+        if [ "$t" -lt "$CUR_BOOT" ] && { [ -z "$PREV_BOOT" ] || [ "$t" -gt "$PREV_BOOT" ]; }; then
+            PREV_BOOT=$t
+        fi
+    done <<< "$recs"
+
+    [ -n "$PREV_BOOT" ] || return 0
+    PREV_SHUTDOWN=unclean
+    while read -r type t; do
+        [ "$type" = shutdown ] || continue
+        [[ "$t" =~ ^[0-9]+$ ]] || continue
+        if [ "$t" -ge "$PREV_BOOT" ] && [ "$t" -le "$CUR_BOOT" ]; then
+            PREV_SHUTDOWN=clean
+        fi
+    done <<< "$recs"
+}
+
+# ---------------------------------------------------------------------
+# Source discovery
+# ---------------------------------------------------------------------
+USE_JOURNAL=0
+JOURNAL_STATE=absent     # absent | ok | limited
+DMESG_STATE=absent       # absent | ok | denied
+FILES=()                 # readable timestamped logs (live file of each family)
+XORG_FILES=()            # Xorg logs (no wall-clock timestamps: chosen by mtime)
+SKIPPED=()               # "path<TAB>reason" for things we found but can't use
+
+scan_sources() {
+    USE_JOURNAL=0; JOURNAL_STATE=absent; DMESG_STATE=absent
+    FILES=(); XORG_FILES=(); SKIPPED=()
+
+    if [ -d /run/systemd/system ] && command -v journalctl >/dev/null 2>&1; then
+        USE_JOURNAL=1
+        JOURNAL_STATE=ok
+        if [ "$(id -u)" -ne 0 ] && ! id -nG | grep -qwE 'systemd-journal|adm|wheel'; then
+            JOURNAL_STATE=limited
+        fi
+    fi
+
+    if command -v dmesg >/dev/null 2>&1; then
+        if dmesg --level=emerg >/dev/null 2>&1; then
+            DMESG_STATE=ok
+        else
+            DMESG_STATE=denied
+        fi
+    fi
+
+    local candidates=() f d g x
+    [ "$USE_JOURNAL" -eq 0 ] && candidates+=("${SYSLOG_FILES[@]}")
+    candidates+=("$RC_LOG")
+    shopt -s nullglob
+    for g in "${CURRENT_GLOBS[@]}"; do
+        # shellcheck disable=SC2206  # intentional glob expansion
+        candidates+=($g)
+    done
+
+    local -A listed=()
+    for f in "${candidates[@]}"; do
+        [ -e "$f" ] || continue
+        [ -n "${listed[$f]:-}" ] && continue
+        listed[$f]=1
+        if [ "$PREV" -eq 0 ] && [ "$DMESG_STATE" = ok ] && [[ "$f" =~ $KERNEL_LOG_RE ]]; then
+            SKIPPED+=("$f"$'\t'"covered by dmesg")
+        elif [ ! -r "$f" ]; then
+            SKIPPED+=("$f"$'\t'"no permission")
+        else
+            FILES+=("$f")
+        fi
+    done
+
+    # Xorg: Xorg.0.log is the current X server, .old the one before it.
+    for x in /var/log/Xorg.0.log /var/log/Xorg.0.log.old; do
+        [ -r "$x" ] && XORG_FILES+=("$x")
+    done
+
+    # Root-only log directories (metalog creates them 0700) hide their
+    # "current" files from the glob above; report the directory instead.
+    for d in /var/log/*/ /var/log/socklog/*/; do
+        d=${d%/}
+        if [ ! -r "$d" ] || [ ! -x "$d" ]; then
+            SKIPPED+=("$d/"$'\t'"no permission")
+        fi
+    done
+    for d in /var/lib/pstore /var/lib/systemd/pstore /sys/fs/pstore; do
+        if [ -d "$d" ] && { [ ! -r "$d" ] || [ ! -x "$d" ]; }; then
+            SKIPPED+=("$d/"$'\t'"no permission (kernel crash dumps)")
+        fi
+    done
+    shopt -u nullglob
+}
+
+# True when something useful is being hidden by missing privileges.
+needs_root() {
+    [ "$(id -u)" -eq 0 ] && return 1
+    [ "$PREV" -eq 0 ] && [ "$DMESG_STATE" = denied ] && return 0
+    [ "$JOURNAL_STATE" = limited ] && return 0
+    local s
+    for s in "${SKIPPED[@]}"; do
+        [[ "$s" == *$'\t'"no permission"* ]] && return 0
+    done
+    return 1
+}
+
+detect_logger() {
+    local p
+    for p in metalog syslog-ng rsyslogd syslogd socklog svlogd s6-log systemd-journald; do
+        if pgrep -x "$p" >/dev/null 2>&1; then
+            echo "$p"
+            return
+        fi
+    done
+    echo none
+}
+
+detect_init() {
+    local comm
+    comm=$(ps -p 1 -o comm= 2>/dev/null)
+    case "$comm" in
+        systemd)              echo systemd ;;
+        dinit)                echo dinit ;;
+        runit)                echo runit ;;
+        s6-svscan)            echo s6 ;;
+        init|openrc-init)     [ -d /run/openrc ] && echo openrc || echo "$comm" ;;
+        *)                    echo "${comm:-unknown}" ;;
+    esac
+}
+
+logger_hint() {
+    local init
+    init=$(detect_init)
+    echo "errors: no system logger is running, so service/daemon messages are not being saved." >&2
+    if [ "$init" = systemd ]; then
+        echo "        Check that systemd-journald is running." >&2
+    else
+        echo "        Install and enable one, e.g.:" >&2
+        echo "          doas pacman -S metalog metalog-$init" >&2
+        case "$init" in
+            openrc) echo "          doas rc-update add metalog default && doas rc-service metalog start" >&2 ;;
+            dinit)  echo "          doas dinitctl enable metalog" >&2 ;;
+            runit)  echo "          doas ln -s /etc/runit/sv/metalog /run/runit/service/" >&2 ;;
+            s6)     echo "          doas s6 set enable metalog && doas s6 live start metalog" >&2 ;;
+        esac
+    fi
+}
+
+shutdown_text() {
+    case "$PREV_SHUTDOWN" in
+        clean)   echo "clean" ;;
+        unclean) echo "NOT clean -- no shutdown was recorded (freeze, crash, power loss or power button)" ;;
+        *)       echo "unknown (no boot records in wtmp or rc.log)" ;;
+    esac
+}
+
+scan_sources
+
+# ---------------------------------------------------------------------
+# Privilege elevation (most logs and dmesg are root-only)
+# ---------------------------------------------------------------------
+if [ "$ELEVATE" -eq 1 ] && needs_root; then
+    if command -v doas >/dev/null 2>&1; then
+        echo "errors: some logs are root-only, re-running with doas (use -U to skip)" >&2
+        exec doas "$0" "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        echo "errors: some logs are root-only, re-running with sudo (use -U to skip)" >&2
+        exec sudo "$0" "$@"
+    fi
+fi
+
+boot_history
+LOGGER=$(detect_logger)
+
+# ---------------------------------------------------------------------
+# -s: source report
+# ---------------------------------------------------------------------
+if [ "$SHOW_SOURCES" -eq 1 ]; then
+    echo "init system   : $(detect_init)"
+    echo "logger        : $LOGGER"
+    echo "running as    : $(id -un)"
+    echo "this boot     : $(fmt_time "$CUR_BOOT")"
+    if [ -n "$PREV_BOOT" ]; then
+        echo "previous boot : $(fmt_time "$PREV_BOOT")"
+    else
+        echo "previous boot : unknown"
+    fi
+    echo "last shutdown : $(shutdown_text)"
+    if [ "$(pstore_backend)" = none ]; then
+        echo "crash dumps   : OFF -- kernel panics are not saved across a reset"
+        echo "                (add efi_pstore.pstore_disable=0 to the kernel command line)"
+    else
+        echo "crash dumps   : on (pstore backend: $(pstore_backend))"
+    fi
+    if is_overlay_log; then
+        echo "WARNING       : /var/log is in RAM (overlay/tmpfs); messages written shortly"
+        echo "                before a crash or power-off may never reach the disk"
+    fi
+    echo
+    echo "Sources used:"
+    case "$JOURNAL_STATE" in
+        ok)      echo "  journal          (systemd journal)" ;;
+        limited) echo "  journal          (only your own user's entries; not in systemd-journal/adm/wheel)" ;;
+    esac
+    case "$DMESG_STATE" in
+        ok)     echo "  dmesg            (kernel ring buffer, this boot)" ;;
+    esac
+    for f in "${FILES[@]}" "${XORG_FILES[@]}"; do echo "  $f"; done
+    if [ "$JOURNAL_STATE" = absent ] && [ "$DMESG_STATE" != ok ] && [ "${#FILES[@]}" -eq 0 ]; then
+        echo "  (none)"
+    fi
+    echo
+    echo "Not used:"
+    n=0
+    case "$DMESG_STATE" in
+        denied) echo "  dmesg                  no permission (kernel.dmesg_restrict=1)"; n=1 ;;
+        absent) echo "  dmesg                  not installed"; n=1 ;;
+    esac
+    for s in "${SKIPPED[@]}"; do
+        printf '  %-22s %s\n' "${s%%$'\t'*}" "${s#*$'\t'}"
+        n=1
+    done
+    [ "$n" -eq 0 ] && echo "  (nothing)"
+    if [ "$LOGGER" = none ]; then
+        echo
+        logger_hint 2>&1
+    fi
+    exit 0
+fi
 
 COLOR=never
 [ -t 1 ] && COLOR=always
 
-HAVE_DMESG=0
-command -v dmesg >/dev/null 2>&1 && HAVE_DMESG=1
+# Highlight matched keywords without dropping any line ("|^" matches all).
+colorize() {
+    grep -aiE --color="$COLOR" --line-buffered "$PATTERN|^"
+}
 
-if [ "$FOLLOW" -eq 1 ]; then
-    echo "errors: following logs -- Ctrl+C to stop" >&2
-
-    if [ "$HAVE_DMESG" -eq 1 ]; then
-        dmesg --follow --level=emerg,alert,crit,err,warn 2>/dev/null &
-        DMESG_PID=$!
-        trap 'kill "$DMESG_PID" 2>/dev/null' EXIT
+report_skipped() {
+    local denied=()
+    [ "$PREV" -eq 0 ] && [ "$DMESG_STATE" = denied ] && denied+=("dmesg")
+    [ "$JOURNAL_STATE" = limited ] && denied+=("journal (system entries)")
+    local s
+    for s in "${SKIPPED[@]}"; do
+        [[ "$s" == *$'\t'"no permission"* ]] && denied+=("${s%%$'\t'*}")
+    done
+    if [ "${#denied[@]}" -gt 0 ]; then
+        echo >&2
+        echo "errors: skipped (no permission): ${denied[*]}" >&2
+        if [ "$ELEVATE" -eq 0 ]; then
+            echo "        run without -U, or as root, to include them" >&2
+        else
+            echo "        install doas or sudo, or run as root, to include them" >&2
+        fi
     fi
+}
 
-    if [ "${#FILES[@]}" -gt 0 ]; then
-        tail -F -n0 "${FILES[@]}" 2>/dev/null | grep --line-buffered -iE --color="$COLOR" "$PATTERN"
-    elif [ "$HAVE_DMESG" -eq 1 ]; then
-        wait "$DMESG_PID"
-    else
-        echo "errors: no readable log files and no dmesg available" >&2
+# ---------------------------------------------------------------------
+# -f: follow mode
+# ---------------------------------------------------------------------
+if [ "$FOLLOW" -eq 1 ]; then
+    FOLLOW_FILES=("${FILES[@]}")
+    [ -r /var/log/Xorg.0.log ] && FOLLOW_FILES+=(/var/log/Xorg.0.log)
+    if [ "$USE_JOURNAL" -eq 0 ] && [ "$DMESG_STATE" != ok ] && [ "${#FOLLOW_FILES[@]}" -eq 0 ]; then
+        echo "errors: nothing to follow -- no readable logs found." >&2
+        report_skipped
+        [ "$LOGGER" = none ] && logger_hint
+        echo "        Run 'errors -s' for details." >&2
         exit 1
     fi
+    report_skipped
+    echo "errors: following logs -- Ctrl+C to stop" >&2
+
+    {
+        if [ "$USE_JOURNAL" -eq 1 ]; then
+            journalctl -f -n0 -q -p warning --no-pager 2>/dev/null &
+        elif [ "$DMESG_STATE" = ok ]; then
+            dmesg -w -xT --level="$DMESG_LEVELS" 2>/dev/null &
+        fi
+        if [ "${#FOLLOW_FILES[@]}" -gt 0 ]; then
+            tail -q -F -n0 "${FOLLOW_FILES[@]}" 2>/dev/null \
+                | grep -aiE --line-buffered "$PATTERN" &
+        fi
+        wait
+    } | awk '
+        # Drop a line if it was printed recently (the same message often
+        # lands in several metalog/syslog files at once).
+        ($0 in seen) { next }
+        {
+            if (n >= 64) delete seen[ring[n % 64]]
+            ring[n % 64] = $0; seen[$0] = 1; n++
+            print; fflush()
+        }' | colorize
+    exit 0
+fi
+
+# ---------------------------------------------------------------------
+# One-shot mode (this boot, or the previous one with -b)
+# ---------------------------------------------------------------------
+if [ "$PREV" -eq 1 ]; then
+    # wtmp/rc.log boot records lag the kernel start by a few seconds.
+    if [ -n "$PREV_BOOT" ]; then WIN_START=$(( PREV_BOOT - 60 )); else WIN_START=0; fi
+    WIN_END=$CUR_BOOT
 else
-    if [ "$HAVE_DMESG" -eq 1 ]; then
-        echo "== kernel (dmesg) =="
-        # dmesg's own --level already filters by real kernel severity, so
-        # it is shown as-is (not re-filtered through PATTERN below, which
-        # is a text match and would wrongly drop e.g. a "warn"-level kernel
-        # message whose text doesn't literally contain the word "warn").
-        DMESG_OUT="$(dmesg --level=emerg,alert,crit,err,warn --color="$COLOR" 2>/dev/null)"
-        if [ -n "$DMESG_OUT" ]; then
-            printf '%s\n' "$DMESG_OUT"
+    WIN_START=$CUR_BOOT
+    WIN_END=0
+fi
+
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/errors.XXXXXX") || exit 1
+trap 'rm -rf "$TMPD"' EXIT
+
+# Cut each log family down to the boot window: "epoch<TAB>line".
+NAMES=()
+for i in "${!FILES[@]}"; do
+    NAMES[i]=${FILES[i]}
+    while read -r part; do
+        # A file last written before the window can't contain lines in it.
+        [ "$(mtime "$part")" -ge "$WIN_START" ] || continue
+        read_log "$part"
+    done < <(log_family "${FILES[i]}") \
+        | $AWK -v start="$WIN_START" -v end="$WIN_END" "$WINDOW_AWK" > "$TMPD/$i"
+done
+
+# Per-line timed logs (rc.log lines only carry their section's start time,
+# so it is left out of "last message" and the closing context).
+TIMED=()
+for i in "${!NAMES[@]}"; do
+    [ "${NAMES[i]}" = "$RC_LOG" ] || TIMED+=("$TMPD/$i")
+done
+
+# Xorg logs have no wall-clock time: pick the one whose last write falls
+# in the window.
+XORG_PICK=""
+for x in "${XORG_FILES[@]}"; do
+    m=$(mtime "$x")
+    if [ "$m" -ge "$WIN_START" ] && { [ "$WIN_END" -eq 0 ] || [ "$m" -lt "$WIN_END" ]; }; then
+        XORG_PICK=$x
+        break
+    fi
+done
+
+PSTORE_FILES=()
+if [ "$PREV" -eq 1 ]; then
+    mapfile -t PSTORE_FILES < <(fresh_pstore_files)
+fi
+
+JOURNAL_PREV_OK=0
+if [ "$USE_JOURNAL" -eq 1 ] && [ "$PREV" -eq 1 ]; then
+    journalctl -b -1 -q -n 1 --no-pager >/dev/null 2>&1 && JOURNAL_PREV_OK=1
+fi
+
+# --- header ---------------------------------------------------------
+if [ "$PREV" -eq 1 ]; then
+    LAST_T=""
+    [ "${#TIMED[@]}" -gt 0 ] && LAST_T=$(cut -f1 "${TIMED[@]}" | sort -n | tail -n 1)
+    {
+        if [ -n "$PREV_BOOT" ]; then
+            echo "Previous boot : $(fmt_time "$PREV_BOOT")"
         else
-            echo "(none)"
+            echo "Previous boot : start unknown -- showing everything logged before this boot"
+        fi
+        if [ -n "$LAST_T" ]; then
+            echo "Last message  : $(fmt_time "$LAST_T")"
+        fi
+        echo "This boot     : $(fmt_time "$CUR_BOOT")"
+        echo "Shutdown      : $(shutdown_text)"
+        if [ "${#PSTORE_FILES[@]}" -gt 0 ]; then
+            echo "Crash dump    : the kernel saved a crash dump -- shown below"
+        elif [ "$(pstore_backend)" = none ]; then
+            echo "Crash dump    : not available (kernel crash dumps are off; see 'errors -s')"
+        else
+            echo "Crash dump    : none saved (the kernel did not panic or oops)"
         fi
         echo
-    fi
-
-    if [ "${#FILES[@]}" -gt 0 ]; then
-        echo "== log files: ${FILES[*]} =="
-        tail -n "$LINES" -q "${FILES[@]}" 2>/dev/null \
-            | grep -iE --color="$COLOR" "$PATTERN" || echo "(none)"
-    else
-        echo "errors: no readable log files found (tried: ${LOG_CANDIDATES[*]})" >&2
+    } | if [ "$COLOR" = always ]; then sed -e 's/NOT clean/\x1b[1;31m&\x1b[0m/'; else cat; fi
+else
+    if [ "$PREV_SHUTDOWN" = unclean ]; then
+        echo "errors: the previous boot ($(fmt_time "$PREV_BOOT")) ended without a clean shutdown." >&2
+        echo "        Run 'errors -b' to see what it logged before it stopped." >&2
+        echo >&2
     fi
 fi
+
+# --- body -------------------------------------------------------------
+# \036 header: section whose lines are de-duplicated against earlier ones.
+# \035 header: section shown in full (crash dumps, last messages).
+{
+    if [ "$USE_JOURNAL" -eq 1 ]; then
+        if [ "$PREV" -eq 1 ]; then
+            if [ "$JOURNAL_PREV_OK" -eq 1 ]; then
+                printf '\036journal (previous boot, warning and worse)\n'
+                journalctl -b -1 -q -p warning --no-pager -n "$LINES" 2>/dev/null
+            fi
+        else
+            printf '\036journal (this boot, warning and worse)\n'
+            journalctl -b -q -p warning --no-pager -n "$LINES" 2>/dev/null
+        fi
+    fi
+    if [ "$PREV" -eq 0 ] && [ "$USE_JOURNAL" -eq 0 ] && [ "$DMESG_STATE" = ok ]; then
+        # dmesg --level filters by real kernel severity, so it is not
+        # re-filtered through PATTERN (a text match).
+        printf '\036kernel (dmesg, this boot)\n'
+        dmesg -xT --level="$DMESG_LEVELS" 2>/dev/null | tail -n "$LINES"
+    fi
+    for i in "${!NAMES[@]}"; do
+        printf '\036%s\n' "${NAMES[i]}"
+        grep -aiE "$PATTERN" "$TMPD/$i" | tail -n "$LINES" | cut -f2-
+    done
+    if [ -n "$XORG_PICK" ]; then
+        printf '\036%s\n' "$XORG_PICK"
+        grep -aE '^(\[ *[0-9.]+\] )?\(EE\)' "$XORG_PICK" | tail -n "$LINES"
+    fi
+    if [ "$PREV" -eq 1 ]; then
+        for p in "${PSTORE_FILES[@]}"; do
+            printf '\035kernel crash dump (pstore): %s\n' "$p"
+            read_log "$p" | tail -n 120
+        done
+        if [ "$JOURNAL_PREV_OK" -eq 1 ]; then
+            printf '\035last %s journal messages before the previous boot ended (all severities)\n' "$LAST_CONTEXT"
+            journalctl -b -1 -q --no-pager -n "$LAST_CONTEXT" 2>/dev/null
+        fi
+        if [ "${#TIMED[@]}" -gt 0 ]; then
+            printf '\035last %s logged messages before the previous boot ended (all severities)\n' "$LAST_CONTEXT"
+            sort -s -n -k1,1 "${TIMED[@]}" | $AWK -F'\t' '!seen[$2]++' | tail -n "$LAST_CONTEXT" | cut -f2-
+        fi
+    fi
+} | $AWK -v color="$COLOR" '
+    /^\036/ { hdr = substr($0, 2); dedupe = 1; next }
+    /^\035/ { hdr = substr($0, 2); dedupe = 0; next }
+    dedupe && seen[$0]++ { next }
+    {
+        if (hdr != "") {
+            if (found) print ""
+            if (color == "always") print "\033[1m== " hdr " ==\033[0m"
+            else print "== " hdr " =="
+            hdr = ""
+        }
+        print; found = 1
+    }
+    END { if (!found) print "(no errors or warnings found)" }
+' | colorize
+
+# --- footer -------------------------------------------------------------
+report_skipped
+
+HAVE_TEXT_LOG=0
+[ "$USE_JOURNAL" -eq 1 ] && HAVE_TEXT_LOG=1
+for f in "${FILES[@]}"; do
+    [ "$f" = "$RC_LOG" ] || HAVE_TEXT_LOG=1
+done
+
+if [ "$HAVE_TEXT_LOG" -eq 0 ]; then
+    echo >&2
+    if [ "$LOGGER" = none ]; then
+        logger_hint
+    else
+        echo "errors: $LOGGER is running but none of its log files could be read." >&2
+        echo "        Run 'errors -s' to see which sources were found." >&2
+    fi
+elif [ "$PREV" -eq 1 ]; then
+    if [ "$USE_JOURNAL" -eq 1 ] && [ "$JOURNAL_PREV_OK" -eq 0 ]; then
+        echo >&2
+        echo "errors: the journal has no previous boot (is journald set to Storage=volatile?)" >&2
+    fi
+    if [ -z "$(cat "$TMPD"/* 2>/dev/null | head -c1)" ] && [ "$JOURNAL_PREV_OK" -eq 0 ]; then
+        echo >&2
+        echo "errors: nothing was logged for the previous boot. If /var/log is kept in RAM" >&2
+        echo "        (ephemeral overlay) or the logger buffers writes, a hard power-off loses it." >&2
+    fi
+fi
+if is_overlay_log; then
+    echo >&2
+    echo "errors: warning: /var/log is in RAM (overlay/tmpfs); messages from just before a" >&2
+    echo "        crash or power-off may not have reached the disk." >&2
+fi
+exit 0
