@@ -8,7 +8,7 @@
 </p>
 
 ## Summary / TLDR
-ULU is a post-installation script and configuration set for Arch, Void, and Debian-based Linux distributions. It configures the existing OS for gaming, low-latency workloads and improved security by installing packages and applying configurations. Utility commands are included also which help manage the system.
+ULU is a post-installation script and configuration set for Arch, Void and Debian-based Linux distributions. It configures the existing OS for gaming, low-latency workloads and improved security by installing packages and applying configurations. Utility commands are included also which help manage the system.
 
 Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxyz/LARBS), which is why ULU's installer is script-based. If you want to see what changes I've made, the files ULU installs are in [files/ulu-packages](https://github.com/Michael-Sebero/ULU/tree/main/files/ulu-packages).
 
@@ -47,7 +47,7 @@ Originally I was inspired by Luke Smith's [LARBS](https://github.com/LukeSmithxy
 * [NTSYNC](https://docs.kernel.org/userspace-api/ntsync.html) - Kernel driver for Windows NT synchronization primitives used by Wine/Proton, loaded at boot
 * [SCX](https://github.com/sched-ext/scx) - Dynamic kernel scheduler framework
 * [Package Dictionary](https://github.com/Michael-Sebero/Package-Dictionary) - Package search across pacman, the AUR, xbps, apt and Flatpak
-* [Earlyoom](https://github.com/rfjakob/earlyoom) - Kills highest usage processes when RAM drops below 15% and free swap below 5%
+* [Earlyoom](https://github.com/rfjakob/earlyoom) - Kills highest usage processes when RAM drops below 15% and free swap (ZRAM and disk combined) below 5%
 * [Nix](https://nixos.org/) - Universal package manager
 * [Limine](https://github.com/limine-bootloader/limine) - Fast boot loader, set as the default boot loader on Arch-based and Void systems
 
@@ -108,12 +108,12 @@ The kernel which comes with the desktop configuration is a custom build of XanMo
 The x86-64-v3 kernels need a CPU with AVX2, BMI2, FMA and MOVBE. Intel Core and AMD Ryzen CPUs from 2017 onward have them; Pentium, Celeron and Atom CPUs of that era don't. The installer checks this before changing anything. At boot, a sched_ext scheduler takes over from the kernel's default scheduler for improved performance and responsiveness.
 
 ### Kernel Scheduler
-The desktop scheduler is set to `IMPERATOR` and laptops use `AURA`. `IMPERATOR` is specialized for new processors (Zen 4-5 or CPUs with 3D V-Cache) and `AURA` for low latency and responsiveness with long battery life. The prebuilt `scx_imperator` binary needs AVX-512, so on CPUs without it, such as AMD Ryzen before Zen 4 (including Zen 3 X3D models) and most Intel desktop CPUs. If you want to change the scheduler, it can be modified in `rc.local` under the scheduler section.
+The desktop scheduler is set to `IMPERATOR` and laptops use `AURA`. `IMPERATOR` is specialized for new processors (Zen 4-5 or CPUs with 3D V-Cache) and `AURA` for low latency and responsiveness with long battery life. The prebuilt `scx_imperator` binary needs AVX-512, so on CPUs without it, such as AMD Ryzen before Zen 4 (including Zen 3 X3D models) and most Intel desktop CPUs, `rc.local` moves on to the next scheduler in its fallback list. If you want to change the scheduler, it can be modified in `rc.local` under the scheduler section.
 
 ### Memory Management
-RAM usage has the highest priority over swapping. Keeping active data in memory reduces wear on the drive and increases system responsiveness. Swapping is still possible but only used when RAM is nearly full, first to ZRAM and then to any swap on disk. Proactive memory compaction is turned off and keeps directory and inode caches in memory longer. 16 HugePages (2 MB each) are reserved at boot and up to 3968 more are allocated on demand for programs that request them.
+RAM usage has the highest priority over swapping. Keeping active data in memory reduces wear on the drive and increases system responsiveness. Swapping is still possible but only used when RAM is nearly full, first to ZRAM and then to any swap on disk. Once less than 15% of RAM is available and less than 5% of all swap (ZRAM and disk combined) is free, Earlyoom ends the largest process. Proactive memory compaction is turned off and directory and inode caches are kept in memory longer. 16 HugePages (2 MB each) are reserved at boot and up to 3968 more are allocated on demand for programs that request them.
 
-**ZRAM Integration:** rc.local sets up compressed swap in RAM. On desktops the ZRAM device is sized to target 50% more effective memory than detected RAM (1.8:1 compression), it's memory use is capped at 60% of the device size and uses [LZ4](https://lz4.org/) for fast swap; once more than 256 MiB is stored, pages that stay idle for 120 seconds are recompressed by [ZSTD](https://github.com/meta/zstd). Laptops create a ZRAM swap device sized to 25% of detected RAM using [ZSTD](https://github.com/meta/zstd). Both desktop and laptop ZRAM have higher priority than swap on disk and Zswap is turned off once ZRAM is active so pages aren't compressed twice.
+**ZRAM Integration:** rc.local sets up compressed swap in RAM. On desktops the ZRAM device is sized to target 50% more effective memory than detected RAM (1.8:1 compression), its memory use is capped at 60% of the device size and uses [LZ4](https://lz4.org/) for fast swap; once more than 256 MiB is stored, pages that stay idle for 120 seconds are recompressed by [ZSTD](https://github.com/meta/zstd) using only spare CPU time. While the desktop ZRAM device has room, swappiness is raised from 1 to 180, so once RAM is full idle program memory is compressed into ZRAM instead of dropping cached files that would have to be read back from disk; when ZRAM is full, swapped off or missing, swappiness returns to the `sysctl.conf` value of 1 so swap on disk is only a last resort. The kernel also starts reclaiming memory earlier (`vm.watermark_scale_factor` 125), so compression happens in the background instead of stalling the program that needs memory. Laptops create a ZRAM swap device sized to 25% of detected RAM using [ZSTD](https://github.com/meta/zstd) and keep swappiness at 1. Both desktop and laptop ZRAM have higher priority than swap on disk and Zswap is turned off once ZRAM is active so pages aren't compressed twice.
 
 ### Ephemeral Overlay
 

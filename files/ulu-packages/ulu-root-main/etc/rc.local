@@ -126,7 +126,9 @@ zram_ratio() {
 
 zram_recompress_loop() {    # $1 = device id, $2 = idle seconds
     local sys="/sys/block/zram$1" secs="$2" orig comp0 comp1 pool0 pool1 same nz
+    # Recompress on spare CPU only (nice 19 for schedulers that ignore SCHED_IDLE)
     renice -n 19 -p "$BASHPID" >/dev/null 2>&1
+    chrt -i -p 0 "$BASHPID" >/dev/null 2>&1
     while :; do
         echo all > "$sys/idle" 2>/dev/null || break
         sleep "$secs"
@@ -144,6 +146,54 @@ zram_recompress_loop() {    # $1 = device id, $2 = idle seconds
     echo "rc.local: zram$1 recompress loop stopped" > /dev/kmsg 2>/dev/null
 }
 
+# RAM > zram > disk swap: swappiness 180 while zram has room, sysctl.conf value once full (98%) or gone
+zram_swappiness_watch() {    # $1 = base swappiness, $2 = zram swappiness
+    local base="$1" high="$2" state="" want room name size used fill pool limit
+    while :; do
+        room=0
+        while read -r name _ size used _; do
+            [[ "$name" == /dev/zram* ]] || continue
+            [[ "$size" =~ ^[0-9]+$ && "$used" =~ ^[0-9]+$ ]] && [ "$size" -gt 0 ] || continue
+            fill=$(( used * 100 / size ))
+            if read -r _ _ pool limit _ < "/sys/block/${name#/dev/}/mm_stat" 2>/dev/null &&
+               [ "${limit:-0}" -gt 0 ] && [ $(( pool * 100 / limit )) -gt "$fill" ]; then
+                fill=$(( pool * 100 / limit ))
+            fi
+            if [ "$fill" -lt 95 ] || { [ "$state" = high ] && [ "$fill" -lt 98 ]; }; then
+                room=1
+                break
+            fi
+        done < /proc/swaps
+        if [ "$room" = 1 ]; then want=high; else want=base; fi
+        if [ "$want" != "$state" ]; then
+            if [ "$want" = high ]; then
+                echo "$high" > /proc/sys/vm/swappiness 2>/dev/null
+                echo "rc.local: zram has room: swappiness $high" > /dev/kmsg 2>/dev/null
+            else
+                echo "$base" > /proc/sys/vm/swappiness 2>/dev/null
+                echo "rc.local: zram full or inactive: swappiness $base" > /dev/kmsg 2>/dev/null
+            fi
+            state=$want
+        fi
+        sleep 2
+    done
+}
+
+# Runs after sysctl -p and only ever raises a value
+zram_vm_tune() {
+    local base cur
+    # Wake kswapd earlier so compression happens in the background, not inside the app
+    cur=$(sysctl -n vm.watermark_scale_factor 2>/dev/null)
+    [[ "$cur" =~ ^[0-9]+$ ]] && [ "$cur" -lt 125 ] && sysctl -q -w vm.watermark_scale_factor=125 >/dev/null 2>&1
+    # zram is random access: no swap readahead
+    sysctl -q -w vm.page-cluster=0 >/dev/null 2>&1
+    # sysctl.conf value, restored when zram is full or gone
+    base=$(cat /proc/sys/vm/swappiness 2>/dev/null)
+    [[ "$base" =~ ^[0-9]+$ ]] || base=60
+    zram_swappiness_watch "$base" $(( base > 180 ? base : 180 )) </dev/null >/dev/null 2>&1 &
+    return 0
+}
+
 setup_zram() {
     local extra_pct=50         
     local algo_want=lz4        
@@ -153,12 +203,24 @@ setup_zram() {
     local recomp_idle=120      
     local id dev sys ram_kb target_kb size cap w algo recomp=0
 
-    # Already active: don't stack a second device
-    grep -q '^/dev/zram' /proc/swaps 2>/dev/null && return 0
+    # Already active: don't stack a second device, still tune reclaim
+    if grep -q '^/dev/zram' /proc/swaps 2>/dev/null; then
+        zram_vm_tune
+        return 0
+    fi
 
     modprobe zram 2>/dev/null || return 1
-    [ -f /sys/class/zram-control/hot_add ] || return 1
-    id=$(cat /sys/class/zram-control/hot_add 2>/dev/null)
+    # Reuse an empty device (modprobe creates zram0) before hot-adding one
+    id=""
+    for sys in /sys/block/zram[0-9]*; do
+        [ "$(cat "$sys/disksize" 2>/dev/null)" = 0 ] || continue
+        id=${sys##*/zram}
+        break
+    done
+    if [ -z "$id" ]; then
+        [ -f /sys/class/zram-control/hot_add ] || return 1
+        id=$(cat /sys/class/zram-control/hot_add 2>/dev/null)
+    fi
     [[ "$id" =~ ^[0-9]+$ ]] || return 1
     dev="/dev/zram$id"
     sys="/sys/block/zram$id"
@@ -195,17 +257,18 @@ setup_zram() {
     # zswap in front of zram compresses every page twice
     [ -w /sys/module/zswap/parameters/enabled ] && echo N > /sys/module/zswap/parameters/enabled
 
+    zram_vm_tune
+
     algo=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$sys/comp_algorithm" 2>/dev/null)
-    echo "rc.local: zram$id ${algo:-?} disksize $((size / 1048576))M pool-cap $((cap / 1048576))M prio 100 recomp=$([ "$recomp" = 1 ] && echo "$recomp_algo/${recomp_idle}s" || echo off)" > /dev/kmsg 2>/dev/null
+    echo "rc.local: zram$id ${algo:-?} disksize $((size / 1048576))M pool-cap $((cap / 1048576))M prio 100 recomp=$([ "$recomp" = 1 ] && echo "$recomp_algo/${recomp_idle}s" || echo off) wsf=$(sysctl -n vm.watermark_scale_factor 2>/dev/null) page-cluster=$(sysctl -n vm.page-cluster 2>/dev/null)" > /dev/kmsg 2>/dev/null
     if [ "$recomp" = 1 ]; then
         zram_recompress_loop "$id" "$recomp_idle" </dev/null >/dev/null 2>&1 &
     fi
     return 0
 }
-setup_zram &
 
-# Kernel Parameters: Runtime Configuration Reload
-{ sysctl -p || true; } &
+# Kernel Parameters: Runtime Configuration Reload (before zram, so its tuning wins)
+{ sysctl -p || true; setup_zram; } &
 
 # Application Prefetching: Daemon Initialization
 { nohup preload >/dev/null 2>&1 & } &
